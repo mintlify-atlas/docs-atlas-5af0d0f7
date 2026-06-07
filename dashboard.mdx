@@ -1,0 +1,113 @@
+---
+title: "NorthStar Dashboard Guide"
+sidebarTitle: "Dashboard"
+description: "The NorthStar dashboard is a Next.js app that visualizes traces, manages prompt versions, runs evals, and configures alert rules across multiple projects."
+---
+
+The NorthStar dashboard is a Next.js 14 application that connects directly to the same Supabase project as your SDK. It provides a real-time window into every trace, session, and LLM call your agents produce — along with tools for managing prompt versions, running evaluations against datasets, and configuring alert rules with webhook delivery.
+
+## Feature overview
+
+<CardGroup cols={2}>
+  <Card title="Trace Viewer" icon="chart-network">
+    Inspect individual agent runs with a DAG graph view of span relationships, a chronological span timeline, per-span input/output content, error details, and a full cost and token usage breakdown across all LLM calls in the run.
+  </Card>
+  <Card title="Sessions" icon="list">
+    Browse all agent sessions with filtering by date, status, project, and environment. Click into any session to see every run it contains and drill down to individual spans and events.
+  </Card>
+  <Card title="Prompts" icon="file-code">
+    Manage versioned prompt templates stored server-side. View the full version history for each prompt, switch between labeled versions (e.g. `production`, `staging`), compare versions side-by-side with a diff view, and test compiled templates in the built-in playground.
+  </Card>
+  <Card title="Evals" icon="flask">
+    Browse eval datasets, launch eval runs against a dataset using deterministic graders or LLM judges, and review per-case grade breakdowns. Scores are stored back into the database and visible alongside the traces that generated them.
+  </Card>
+  <Card title="Settings" icon="gear">
+    Manage project API keys, configure project-scoped provider keys for eval LLM judges (OpenAI, Anthropic, OpenRouter, and other LiteLLM-compatible providers), define webhook endpoints, and configure alert rules for error rate, P95 latency, and token budget thresholds.
+  </Card>
+</CardGroup>
+
+## Local development setup
+
+The dashboard is a standalone Next.js app in the `dashboard/` directory. It uses `pnpm` as its package manager.
+
+<Steps>
+
+### Install dependencies
+
+```bash
+cd dashboard
+pnpm install
+```
+
+### Configure environment variables
+
+Copy the example environment file and fill in the values for your Supabase project:
+
+```bash
+cp .env.local.example .env.local
+```
+
+Open `.env.local` and set all required variables (see the [Environment variables](#environment-variables) section below).
+
+### Start the development server
+
+```bash
+pnpm dev
+```
+
+The dashboard will be available at [http://localhost:3000](http://localhost:3000).
+
+</Steps>
+
+## Environment variables
+
+The dashboard reads the following environment variables at runtime. All are required unless noted.
+
+| Variable | Required | Description |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | ✅ | The public API URL of your Supabase project, e.g. `https://<project-ref>.supabase.co`. |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | ✅ | The `anon` public key from your Supabase project settings. Used by the browser client for authenticated dashboard sessions. |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ | The `service_role` secret key. Used by server-side Next.js routes to access the `private` schema tables that hold trace data. |
+| `DASHBOARD_API_KEY` | ✅ | An API key used to authenticate dashboard server-side API routes. |
+| `NORTHSTAR_DEMO_BACKEND_PROJECT_ID` | — | Optional Supabase project reference for a read-only demo dataset shown on the landing page. |
+| `PROVIDER_KEYS_ENCRYPTION_KEY` | — | A 32-byte base64 symmetric key used to encrypt project-scoped provider keys before storing them in the database. Required if you want to use LLM judges in eval runs. Generate with `openssl rand -base64 32`. |
+
+<Note>
+`NEXT_PUBLIC_` prefixed variables are embedded into the browser bundle at build time. Do not put secrets in `NEXT_PUBLIC_` variables.
+</Note>
+
+### Generating PROVIDER_KEYS_ENCRYPTION_KEY
+
+```bash
+openssl rand -base64 32
+```
+
+Set the output as the value of `PROVIDER_KEYS_ENCRYPTION_KEY` in both `.env.local` (for local development) and your production deployment environment.
+
+## Prompt playground
+
+The Prompts section of the dashboard includes a built-in playground that lets you test any saved prompt version against live models without writing code. Select a prompt, choose a version or label, fill in any template variables (Jinja `{{ variable }}` or Python `{variable}` syntax), choose a provider and model from your configured provider keys, and run the completion directly from the browser.
+
+The playground uses the project-scoped provider keys stored in Settings → Provider Keys. Add at least one provider key before using the playground.
+
+<Tip>
+Use the playground to verify that a prompt behaves correctly before promoting it to the `production` label. Changes to the label are picked up immediately by any SDK call to `northstar.pull_prompt("my-prompt", label="production")`.
+</Tip>
+
+## Alert rules and webhooks
+
+The Settings section of the dashboard lets you define alert rules scoped to a project. Three rule kinds are supported:
+
+| Kind | Description |
+|---|---|
+| `error_rate` | Fires when the fraction of errored runs exceeds the configured threshold. |
+| `latency_p95` | Fires when the P95 run latency exceeds the configured threshold (in milliseconds). |
+| `token_budget` | Fires when token usage in a window exceeds the configured threshold. |
+
+Each rule can be toggled enabled or disabled without deleting it. When an enabled rule fires, NorthStar delivers a webhook `POST` request to every active webhook URL registered for the project. Configure webhook URLs in Settings → Webhooks.
+
+## Connecting to your Supabase project
+
+The dashboard connects to the **same Supabase project** used by the SDK. The `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` values are used for dashboard user authentication, while `SUPABASE_SERVICE_ROLE_KEY` is used in Next.js Server Components and API routes to query the `private` schema tables that hold your trace data.
+
+There is no separate database or data sync step — traces written by the SDK are immediately visible in the dashboard.

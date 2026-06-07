@@ -1,0 +1,343 @@
+---
+title: "NorthStar Data Models — Session, Run, Span, Event"
+sidebarTitle: "Models"
+description: "Reference for the core Pydantic models: Session, Run, Span, Event, Score, SpanKind, RunStatus, and CaptureOptions. All are exported from the northstar package."
+---
+
+NorthStar's trace store is built around five core Pydantic models: **Session**, **Run**, **Span**, **Event**, and **Score**. Every trace your agent produces maps to one or more of these models. `Session`, `Run`, and `Span` implement Python's context manager protocol — open them with `with`, and the SDK automatically sets timestamps, captures exceptions, and flushes the record to the backend when the block exits.
+
+```python
+from northstar import Session, Run, Span, Event, Score, SpanKind, RunStatus, CaptureOptions
+```
+
+---
+
+## Enums
+
+### RunStatus
+
+`RunStatus` is a `StrEnum` that describes the terminal state of a `Run` or `Span`.
+
+| Value | String | Meaning |
+|---|---|---|
+| `RunStatus.RUNNING` | `"running"` | The run or span is still in progress |
+| `RunStatus.OK` | `"ok"` | Completed successfully |
+| `RunStatus.ERROR` | `"error"` | Terminated with an exception |
+
+### SpanKind
+
+`SpanKind` describes the semantic type of work a `Span` represents.
+
+| Value | String | Meaning |
+|---|---|---|
+| `SpanKind.AGENT` | `"agent"` | Top-level agent orchestration span |
+| `SpanKind.WORKFLOW` | `"workflow"` | Multi-step workflow or pipeline |
+| `SpanKind.MODEL` | `"model"` | LLM completion call |
+| `SpanKind.TOOL` | `"tool"` | Tool or function call |
+| `SpanKind.CUSTOM` | `"custom"` | User-defined span type |
+
+### EventType
+
+`EventType` classifies the semantic role of an `Event` within a run.
+
+| Value | String | Meaning |
+|---|---|---|
+| `EventType.USER_INPUT` | `"user_input"` | Raw user message or prompt |
+| `EventType.SYSTEM_MESSAGE` | `"system_message"` | System prompt sent to a model |
+| `EventType.ASSISTANT_MESSAGE` | `"assistant_message"` | Assistant turn content |
+| `EventType.REASONING` | `"reasoning"` | Internal reasoning or chain-of-thought |
+| `EventType.TOOL_ARGUMENTS` | `"tool_arguments"` | Arguments sent to a tool call |
+| `EventType.TOOL_RESULT` | `"tool_result"` | Output returned by a tool |
+| `EventType.FINAL_RESPONSE` | `"final_response"` | Agent's final response to the user |
+| `EventType.CUSTOM` | `"custom"` | User-defined event |
+
+---
+
+## Session
+
+A `Session` is the top-level container for one or more `Run` objects. It typically maps to a user session, a conversation, or a single request lifecycle. Create sessions through `Northstar.session()`, never by instantiating `Session` directly.
+
+```python
+with client.session(metadata={"user_id": "u_123"}) as session:
+    with session.run("my-agent") as run:
+        run.record_user_input("Hello!")
+        run.record_final_response("Hi there!")
+```
+
+<ResponseField name="id" type="UUID" required>
+  Auto-generated unique identifier for this session. Set to a random `uuid4` by default.
+</ResponseField>
+
+<ResponseField name="project_id" type="UUID | None">
+  Assigned by the backend during authenticated ingestion. `None` before the first flush — the ingest endpoint stamps the correct value.
+</ResponseField>
+
+<ResponseField name="created_at" type="datetime">
+  UTC timestamp when the session was created. Defaults to the current UTC time.
+</ResponseField>
+
+<ResponseField name="ended_at" type="datetime | None">
+  UTC timestamp set automatically when the session's `__exit__` method is called. `None` while the session is still open.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict[str, Any]">
+  Arbitrary key-value pairs attached to the session (e.g., `user_id`, `environment`, `ab_group`). Defaults to an empty dict.
+</ResponseField>
+
+<Note>
+  `Session.__exit__` sets `ended_at`, enqueues the session record, and calls `client.flush()` synchronously. If an exception propagated from inside the `with` block, it is re-raised after flushing.
+</Note>
+
+---
+
+## Run
+
+A `Run` represents a single agent execution inside a session — a turn, a job, or an end-to-end invocation. Create runs through `Session.run()`. The `status` field transitions automatically: it starts as `RUNNING`, becomes `OK` on clean exit, and becomes `ERROR` if an exception escapes the `with` block.
+
+```python
+with session.run("research-agent", metadata={"query": "..."}) as run:
+    run.record_user_input("What is the weather in Paris?")
+    with run.span("search", kind=SpanKind.TOOL) as span:
+        ...
+    run.record_final_response("It is 22°C and sunny.")
+```
+
+<ResponseField name="id" type="UUID" required>
+  Auto-generated unique identifier for this run.
+</ResponseField>
+
+<ResponseField name="session_id" type="UUID" required>
+  The `id` of the parent `Session`. Set automatically when created via `Session.run()`.
+</ResponseField>
+
+<ResponseField name="name" type="str" required>
+  A human-readable label for this run, e.g. `"research-agent"` or `"support-ticket-handler"`.
+</ResponseField>
+
+<ResponseField name="status" type="RunStatus">
+  Current status of the run. Starts as `RunStatus.RUNNING`. Set to `RunStatus.OK` or `RunStatus.ERROR` on `__exit__`. Defaults to `RunStatus.RUNNING`.
+</ResponseField>
+
+<ResponseField name="error" type="dict[str, Any] | None">
+  Populated automatically when an exception escapes the `with` block. Contains `type`, `message`, and `module` keys. `None` on success.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict[str, Any]">
+  Arbitrary key-value pairs. After the run exits, the SDK also writes aggregated `cost_usd`, `total_input_tokens`, and `total_output_tokens` into `metadata` if any child model spans recorded usage. Defaults to an empty dict.
+</ResponseField>
+
+<ResponseField name="started_at" type="datetime">
+  UTC timestamp set when the `Run` object is created. Defaults to the current UTC time.
+</ResponseField>
+
+<ResponseField name="ended_at" type="datetime | None">
+  UTC timestamp set automatically on `__exit__`. `None` while the run is still in progress.
+</ResponseField>
+
+---
+
+## Span
+
+A `Span` is a nestable unit of work inside a `Run`. Spans can represent a model call, a tool invocation, a retrieval step, or any custom segment. They form a parent-child tree: the SDK tracks the currently active span per run, so nested `with run.span(...)` blocks automatically set `parent_span_id`.
+
+```python
+with run.span("retrieve-docs", kind=SpanKind.TOOL) as span:
+    span.record_tool_arguments({"query": "Paris weather"})
+    results = vector_db.search("Paris weather")
+    span.record_tool_result(results)
+```
+
+<ResponseField name="id" type="UUID" required>
+  Auto-generated unique identifier for this span.
+</ResponseField>
+
+<ResponseField name="run_id" type="UUID" required>
+  The `id` of the parent `Run`. Set automatically when created via `Run.span()`.
+</ResponseField>
+
+<ResponseField name="parent_span_id" type="UUID | None">
+  The `id` of the enclosing span, if any. Set automatically based on the active span stack. `None` for top-level spans.
+</ResponseField>
+
+<ResponseField name="kind" type="SpanKind" required>
+  Semantic type of this span. Must be one of `SpanKind.AGENT`, `SpanKind.WORKFLOW`, `SpanKind.MODEL`, `SpanKind.TOOL`, or `SpanKind.CUSTOM`.
+</ResponseField>
+
+<ResponseField name="name" type="str" required>
+  Human-readable label for this span, e.g. `"retrieve-docs"` or `"gpt-4o-call"`.
+</ResponseField>
+
+<ResponseField name="status" type="RunStatus">
+  Starts as `RunStatus.RUNNING`. Set to `RunStatus.OK` on clean exit or `RunStatus.ERROR` if an exception escapes. Defaults to `RunStatus.RUNNING`.
+</ResponseField>
+
+<ResponseField name="error" type="dict[str, Any] | None">
+  Exception metadata (`type`, `message`, `module`) captured automatically on error. `None` on success.
+</ResponseField>
+
+<ResponseField name="iteration" type="int | None">
+  Optional loop iteration counter. Useful when a span is created inside an agentic loop to distinguish iteration `0`, `1`, `2`, etc. Defaults to `None`.
+</ResponseField>
+
+<ResponseField name="attributes" type="dict[str, Any]">
+  Freeform key-value attributes. For model spans, the SDK populates `model`, `input_tokens`, `output_tokens`, `total_tokens`, `cost_usd`, and `pricing_source` automatically. Defaults to an empty dict.
+</ResponseField>
+
+<ResponseField name="started_at" type="datetime">
+  UTC timestamp set when the `Span` object is created.
+</ResponseField>
+
+<ResponseField name="ended_at" type="datetime | None">
+  UTC timestamp set automatically on `__exit__`. `None` while the span is open.
+</ResponseField>
+
+---
+
+## Event
+
+An `Event` is an immutable log entry scoped to a `Run` and optionally to a `Span`. Events are created by calling `record_*` methods on a `Run` or `Span`. Which event types are actually stored depends on the `CaptureOptions` configured on the client.
+
+<ResponseField name="id" type="UUID" required>
+  Auto-generated unique identifier for this event.
+</ResponseField>
+
+<ResponseField name="run_id" type="UUID" required>
+  The `id` of the parent `Run`.
+</ResponseField>
+
+<ResponseField name="span_id" type="UUID | None">
+  The `id` of the enclosing `Span`, if the event was created from a span context. `None` for run-level events.
+</ResponseField>
+
+<ResponseField name="type" type="EventType" required>
+  The semantic category of this event. One of the `EventType` enum values listed above.
+</ResponseField>
+
+<ResponseField name="content" type="Any" required>
+  The payload of the event. May be a string, dict, list, or any JSON-serializable value.
+</ResponseField>
+
+<ResponseField name="attributes" type="dict[str, Any]">
+  Additional structured metadata. For tool events, the SDK adds `tool_call_id` and `name` automatically. Defaults to an empty dict.
+</ResponseField>
+
+<ResponseField name="created_at" type="datetime">
+  UTC timestamp set when the event is created.
+</ResponseField>
+
+---
+
+## Score
+
+A `Score` attaches a numeric, boolean, or categorical quality signal to a run or span. Scores are created via `client.score()` — see the [Scores reference](/sdk/scores) for the full API.
+
+<ResponseField name="id" type="UUID">
+  Auto-generated unique identifier for this score.
+</ResponseField>
+
+<ResponseField name="trace_id" type="UUID" required>
+  The `id` of the `Run` (trace) this score is attached to.
+</ResponseField>
+
+<ResponseField name="span_id" type="UUID | None">
+  Optionally scope the score to a specific `Span`. `None` scopes it to the whole run.
+</ResponseField>
+
+<ResponseField name="name" type="str" required>
+  A non-blank label for the score, e.g. `"relevance"`, `"faithfulness"`, or `"latency_ok"`.
+</ResponseField>
+
+<ResponseField name="value" type="float" required>
+  The numeric value. For `boolean` scores, must be `0.0` (false) or `1.0` (true). For `categorical` scores, always stored as `0.0`; the human-readable label is in `string_value`.
+</ResponseField>
+
+<ResponseField name="data_type" type='"numeric" | "categorical" | "boolean"' required>
+  Inferred automatically from the Python type of the value passed to `client.score()`. Determines how the dashboard renders the score.
+</ResponseField>
+
+<ResponseField name="string_value" type="str | None">
+  The string label for `categorical` scores (e.g. `"thumbs_up"`). Required when `data_type == "categorical"`, forbidden otherwise.
+</ResponseField>
+
+<ResponseField name="source" type='"api"'>
+  Always `"api"` for scores created through the Python SDK. Scores generated by `EvalSuite` are also submitted through the API.
+</ResponseField>
+
+<ResponseField name="comment" type="str | None">
+  Optional free-text note attached to this score, e.g. an annotator's rationale.
+</ResponseField>
+
+<ResponseField name="created_at" type="datetime">
+  UTC timestamp set when the score is created.
+</ResponseField>
+
+---
+
+## CaptureOptions
+
+`CaptureOptions` controls which event types the SDK records and ships. Pass it to `Northstar(capture=...)` at init time. All fields default to `False` — opting in is explicit, so sensitive content is never captured accidentally.
+
+```python
+from northstar import CaptureOptions, Northstar
+
+client = Northstar(
+    api_key="ns_...",
+    project_id="<project-ref>",
+    capture=CaptureOptions(
+        user_input=True,
+        final_response=True,
+        tool_arguments=True,
+        tool_results=True,
+    ),
+)
+```
+
+<ResponseField name="user_input" type="bool">
+  When `True`, `USER_INPUT` events are recorded. Default: `False`.
+</ResponseField>
+
+<ResponseField name="system_messages" type="bool">
+  When `True`, `SYSTEM_MESSAGE` events are recorded. Default: `False`.
+</ResponseField>
+
+<ResponseField name="assistant_messages" type="bool">
+  When `True`, `ASSISTANT_MESSAGE` events are recorded. Default: `False`.
+</ResponseField>
+
+<ResponseField name="reasoning" type="bool">
+  When `True`, `REASONING` events (chain-of-thought, scratchpad) are recorded. Default: `False`.
+</ResponseField>
+
+<ResponseField name="tool_arguments" type="bool">
+  When `True`, `TOOL_ARGUMENTS` events are recorded. Default: `False`.
+</ResponseField>
+
+<ResponseField name="tool_results" type="bool">
+  When `True`, `TOOL_RESULT` events are recorded. Default: `False`.
+</ResponseField>
+
+<ResponseField name="final_response" type="bool">
+  When `True`, `FINAL_RESPONSE` events are recorded. Default: `False`.
+</ResponseField>
+
+<Warning>
+  `CaptureOptions` defaults all fields to `False`. You must explicitly enable each event type you want persisted. This is intentional — tool results and user messages may contain PII or secrets.
+</Warning>
+
+---
+
+## Context manager lifecycle
+
+`Session`, `Run`, and `Span` all implement `__enter__` / `__exit__`. The pattern is always:
+
+```python
+with client.session() as session:          # __enter__: returns self
+    with session.run("agent") as run:      # __enter__: returns self, enqueues run
+        with run.span("tool", kind=SpanKind.TOOL) as span:  # pushes onto active stack
+            ...
+        # __exit__: span ended_at set, status = OK or ERROR, enqueued
+    # __exit__: run ended_at set, model costs aggregated, enqueued
+# __exit__: session ended_at set, flush() called
+```
+
+If an exception escapes any context manager, the SDK sets `status = RunStatus.ERROR`, populates the `error` dict, and re-raises the exception after flushing. Application control flow is never silently swallowed.

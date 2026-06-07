@@ -1,0 +1,297 @@
+---
+title: "LLMService — LiteLLM Wrapper with Native Tracing"
+sidebarTitle: "LLMService"
+description: "LLMService wraps LiteLLM's completion API and records model spans, token usage, and USD cost automatically. Supports sync, async, streaming, and async streaming."
+---
+
+`LLMService` is a thin, opinionated wrapper around [LiteLLM](https://docs.litellm.ai/) that integrates NorthStar tracing into every completion call without any boilerplate. Every method creates a `MODEL` span, records input messages, captures the output message, and reports prompt and completion token counts along with the USD cost — all automatically. You only need to call `llm.generate()` the same way you would call `litellm.completion()`.
+
+---
+
+## Installation
+
+`LLMService` depends on LiteLLM for token counting, cost lookups, and provider routing. Install the `pricing` extra:
+
+```bash
+uv add 'northstar-ai[pricing]'
+```
+
+<Note>
+  `LLMService` requires `northstar.init()` (or a `Northstar` client) to be initialized before any method is called. The tracing span is created against the active NorthStar context; calling `LLMService` without an initialized client raises a `RuntimeError`.
+</Note>
+
+---
+
+## Constructor
+
+```python
+from northstar.llm import LLMService
+
+llm = LLMService(default_model="gpt-4o-mini")
+```
+
+<ParamField path="default_model" type="str">
+  The LiteLLM model string used when `model` is not passed to a generation method. Accepts any model identifier that LiteLLM supports, including provider-prefixed strings like `"openrouter/deepseek/deepseek-v4-flash"` or `"anthropic/claude-3-5-sonnet-20241022"`. Defaults to `"gpt-4o-mini"`.
+</ParamField>
+
+---
+
+## Methods
+
+### `generate()` — Synchronous completion
+
+Calls `litellm.completion()` synchronously and returns the full response object. A `MODEL` span is opened, input messages and the output message are recorded, and token usage is reported before the span closes.
+
+```python
+response = llm.generate(
+    messages=[{"role": "user", "content": "Summarize this document."}],
+    tools=tool_schemas,
+    temperature=0.2,
+)
+content = response.choices[0].message.content
+```
+
+<ParamField path="messages" type="list[dict[str, Any]]" required>
+  The conversation history in OpenAI message format. Each entry must have a `"role"` key (`"system"`, `"user"`, `"assistant"`, or `"tool"`) and a `"content"` key.
+</ParamField>
+
+<ParamField path="model" type="str | None">
+  Override the model for this call. Falls back to `default_model` when `None`. Accepts any LiteLLM model string.
+</ParamField>
+
+<ParamField path="tools" type="list[dict[str, Any]] | None">
+  Tool schemas in OpenAI function-calling format. When provided, `tool_choice` is also forwarded to the provider. When `None`, tool calling is disabled.
+</ParamField>
+
+<ParamField path="tool_choice" type="Any">
+  Forwarded directly to LiteLLM when `tools` is provided. Ignored when `tools` is `None`. Defaults to `"auto"`.
+</ParamField>
+
+<ParamField path="temperature" type="float">
+  Sampling temperature. Lower values produce more deterministic outputs. Defaults to `0.3`.
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Additional keyword arguments passed directly to `litellm.completion()`. Use this to pass `max_tokens`, `top_p`, `stop`, `response_format`, and any other provider-specific parameters.
+</ParamField>
+
+**Returns:** A LiteLLM `ModelResponse` object (compatible with `openai.ChatCompletion`).
+
+---
+
+### `agenerate()` — Async completion
+
+Identical to `generate()` but calls `litellm.acompletion()` with `await`. Use inside `async def` functions.
+
+```python
+response = await llm.agenerate(
+    messages=[{"role": "user", "content": "Hello"}],
+    model="gpt-4o",
+)
+```
+
+<ParamField path="messages" type="list[dict[str, Any]]" required>
+  The conversation history in OpenAI message format.
+</ParamField>
+
+<ParamField path="model" type="str | None">
+  Override the model for this call. Falls back to `default_model` when `None`.
+</ParamField>
+
+<ParamField path="tools" type="list[dict[str, Any]] | None">
+  Tool schemas. When `None`, tool calling is disabled.
+</ParamField>
+
+<ParamField path="tool_choice" type="Any">
+  Forwarded to LiteLLM when `tools` is provided. Defaults to `"auto"`.
+</ParamField>
+
+<ParamField path="temperature" type="float">
+  Sampling temperature. Defaults to `0.3`.
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Additional keyword arguments forwarded to `litellm.acompletion()`.
+</ParamField>
+
+**Returns:** A LiteLLM `ModelResponse` object.
+
+---
+
+### `stream()` — Synchronous streaming generator
+
+Calls `litellm.completion()` with `stream=True` and yields each chunk as it arrives. Input messages are recorded before streaming begins. Token usage is captured from the final usage chunk (LiteLLM's `stream_options={"include_usage": True}` is set automatically). The full aggregated content is recorded as the output message after the generator is exhausted.
+
+```python
+for chunk in llm.stream(
+    messages=[{"role": "user", "content": "Tell me a story"}]
+):
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+<ParamField path="messages" type="list[dict[str, Any]]" required>
+  The conversation history in OpenAI message format.
+</ParamField>
+
+<ParamField path="model" type="str | None">
+  Override the model for this call. Falls back to `default_model` when `None`.
+</ParamField>
+
+<ParamField path="tools" type="list[dict[str, Any]] | None">
+  Tool schemas. When `None`, tool calling is disabled.
+</ParamField>
+
+<ParamField path="tool_choice" type="Any">
+  Forwarded to LiteLLM when `tools` is provided. Defaults to `"auto"`.
+</ParamField>
+
+<ParamField path="temperature" type="float">
+  Sampling temperature. Defaults to `0.3`.
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Additional keyword arguments forwarded to `litellm.completion()`. Note: `stream_options` is set automatically if not provided.
+</ParamField>
+
+**Yields:** LiteLLM streaming chunk objects, each with a `choices[0].delta` attribute.
+
+---
+
+### `astream()` — Async streaming generator
+
+Identical to `stream()` but uses `litellm.acompletion()` with `stream=True` and `async for`. Input messages are recorded before streaming, usage is captured from the final chunk, and the full content is recorded after the async generator is exhausted.
+
+```python
+async for chunk in llm.astream(
+    messages=[{"role": "user", "content": "Tell me a story"}]
+):
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+<ParamField path="messages" type="list[dict[str, Any]]" required>
+  The conversation history in OpenAI message format.
+</ParamField>
+
+<ParamField path="model" type="str | None">
+  Override the model for this call. Falls back to `default_model` when `None`.
+</ParamField>
+
+<ParamField path="tools" type="list[dict[str, Any]] | None">
+  Tool schemas. When `None`, tool calling is disabled.
+</ParamField>
+
+<ParamField path="tool_choice" type="Any">
+  Forwarded to LiteLLM when `tools` is provided. Defaults to `"auto"`.
+</ParamField>
+
+<ParamField path="temperature" type="float">
+  Sampling temperature. Defaults to `0.3`.
+</ParamField>
+
+<ParamField path="**kwargs" type="Any">
+  Additional keyword arguments forwarded to `litellm.acompletion()`. `stream_options` is set automatically if not provided.
+</ParamField>
+
+**Yields:** LiteLLM async streaming chunk objects.
+
+---
+
+## Full usage example
+
+```python
+import os
+from northstar import Northstar, CaptureOptions, SpanKind
+from northstar.llm import LLMService
+
+client = Northstar(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    capture=CaptureOptions(tool_arguments=True, tool_results=True, final_response=True),
+)
+
+llm = LLMService(default_model="gpt-4o-mini")
+
+tool_schemas = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for a query.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    }
+]
+
+with client.session() as session:
+    with session.run("research-agent") as run:
+        run.record_user_input("What is the capital of France?")
+
+        response = llm.generate(
+            messages=[
+                {"role": "system", "content": "You are a helpful research assistant."},
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+            tools=tool_schemas,
+        )
+
+        run.record_final_response(response.choices[0].message.content)
+```
+
+## Streaming example
+
+```python
+with client.session() as session:
+    with session.run("story-agent") as run:
+        full_text = ""
+        for chunk in llm.stream(
+            messages=[{"role": "user", "content": "Tell me a short story about a robot."}],
+            model="gpt-4o",
+            temperature=0.7,
+        ):
+            delta = chunk.choices[0].delta.content
+            if delta:
+                print(delta, end="", flush=True)
+                full_text += delta
+
+        run.record_final_response(full_text)
+```
+
+## Async streaming example
+
+```python
+import asyncio
+
+async def run_agent():
+    async with ... :  # your async session management
+        async for chunk in llm.astream(
+            messages=[{"role": "user", "content": "Explain quantum entanglement briefly."}],
+        ):
+            if chunk.choices[0].delta.content:
+                print(chunk.choices[0].delta.content, end="", flush=True)
+
+asyncio.run(run_agent())
+```
+
+---
+
+## What gets recorded automatically
+
+Every `LLMService` method creates a `MODEL` span and records the following without any extra code:
+
+| Recorded data | Source |
+|---|---|
+| Input messages (per `CaptureOptions`) | `span.record_input_messages()` |
+| Output message (per `CaptureOptions`) | `span.record_output_message()` |
+| `model`, `input_tokens`, `output_tokens`, `total_tokens` | `span.record_usage()` |
+| `cost_usd` in USD | NorthStar pricing module via LiteLLM pricing tables |
+| Span `status = ERROR` + `error` dict | Automatic on any exception |
+
+<Tip>
+  Because `LLMService` calls `span.record_usage()` internally, you do not need to call `model_call()`, `record_usage()`, or `record_input_messages()` separately. The spans are fully populated by the time the method returns.
+</Tip>

@@ -1,0 +1,252 @@
+---
+title: "Prompt Template Syntax and Compilation"
+sidebarTitle: "Templates"
+description: "NorthStar prompt templates support both Jinja2-style double-brace syntax and Python str.format-style single-brace variables. Missing variables raise a validation error at compile time."
+---
+
+NorthStar prompt templates are plain strings with variable placeholders embedded directly in the content. When you compile a template, the SDK replaces every placeholder with the value you supply — and if any placeholder has no corresponding value, it raises a `ValueError` immediately rather than leaving a gap in the rendered output. The template engine supports two placeholder styles so you can use whichever feels natural for your team or mix them freely in a single template.
+
+## Supported template syntax
+
+Both placeholder styles resolve to the same underlying mechanism — a regex scan followed by string substitution — and can be used together in the same template.
+
+<CodeGroup>
+```python Jinja2-style (double braces)
+# Variables are wrapped in {{ }} with optional surrounding whitespace
+template = "Summarize {{ doc }} in {{ max_words }} words."
+
+# Renders to:
+# "Summarize [doc text] in 120 words."
+```
+
+```python Python str.format-style (single braces)
+# Variables are wrapped in { } — no surrounding whitespace is needed
+template = "Summarize {doc} in {max_words} words."
+
+# Renders to:
+# "Summarize [doc text] in 120 words."
+```
+
+```python Mixed (both styles in one template)
+# Both syntaxes work together in the same content string
+template = "Hello {{ name }}, write {count} bullets about {{ topic }}."
+
+# Renders to:
+# "Hello Ada, write 5 bullets about tracing."
+```
+</CodeGroup>
+
+<Note>
+  The single-brace `{variable}` pattern only matches identifiers — it will not
+  accidentally consume Python format strings that use positional arguments like
+  `{0}` or advanced format specs like `{value:.2f}`. Only plain alphabetic
+  variable names (`[a-zA-Z_][a-zA-Z0-9_]*`) are treated as template variables.
+</Note>
+
+## Compilation API
+
+### `northstar.compile_prompt(prompt_version, variables)`
+
+The module-level `compile_prompt` function (exported from `northstar` as an alias for `prompts.compile`) renders a `PromptVersion` with a dict of variable values and returns a `CompiledPrompt`.
+
+```python
+from northstar import compile_prompt, PromptVersion
+
+version = PromptVersion(
+    id=...,
+    prompt_id=...,
+    version_number=3,
+    content="Summarize {{ doc }} in {max_words} words.",
+    content_hash="sha256:...",
+)
+
+compiled = compile_prompt(version, {"doc": "NorthStar traces agents.", "max_words": 50})
+
+print(compiled.content)
+# "Summarize NorthStar traces agents. in 50 words."
+
+print(compiled.raw_content)
+# "Summarize {{ doc }} in {max_words} words."
+```
+
+### `CompiledPrompt.bind(variables, span)`
+
+`bind()` is a context manager on `CompiledPrompt` that compiles the underlying template with the given variables and, when the block exits, records a prompt link on the target span. This is the preferred way to associate a prompt version with a model call span when you need explicit control over which span receives the link.
+
+```python
+with northstar.pull_prompt("summarizer", label="production") as prompt:
+    with northstar.model_call("summarise", model="gpt-4o") as llm:
+        with prompt.bind(
+            variables={"doc": doc_text, "max_words": 120},
+            span=llm,
+        ) as compiled:
+            llm.record_input_messages([{"role": "user", "content": compiled.content}])
+```
+
+When `span` is omitted, `bind()` automatically picks up the active model call span from the current context — so in most cases you do not need to pass it explicitly:
+
+```python
+with northstar.pull_prompt("greeting") as prompt:
+    with northstar.model_call("chat", model="gpt-4o-mini"):
+        with prompt.bind(variables={"name": "Ada"}) as compiled:
+            # compiled.content == "Hello Ada."
+            ...
+```
+
+<Note>
+  `bind()` is both a sync and async context manager — `async with
+  prompt.bind(...)` works identically in async agent code.
+</Note>
+
+## CompiledPrompt fields
+
+<ResponseField name="prompt_id" type="UUID" required>
+  The UUID of the parent `Prompt` this compiled result belongs to.
+</ResponseField>
+
+<ResponseField name="prompt_version_id" type="UUID" required>
+  The UUID of the `PromptVersion` that was rendered. This is the value stored
+  in the prompt link on the model call span.
+</ResponseField>
+
+<ResponseField name="content" type="str" required>
+  The fully rendered template string with all variable placeholders replaced by
+  their supplied values. Pass this directly to your LLM as the message content.
+</ResponseField>
+
+<ResponseField name="raw_content" type="str" required>
+  The original unrendered template string (i.e. `PromptVersion.content`).
+  Stored alongside `content` so you can always recover the template structure
+  from the compiled result.
+</ResponseField>
+
+<ResponseField name="variables" type="dict[str, Any]">
+  The dict of variable values that were substituted during compilation. Stored
+  in the prompt link payload and visible in the dashboard trace view.
+</ResponseField>
+
+<ResponseField name="model" type="str | None">
+  The model identifier hint inherited from the `PromptVersion`. Your code can
+  read this instead of hardcoding the model name in the calling code.
+</ResponseField>
+
+<ResponseField name="temperature" type="float | None">
+  The temperature hint inherited from the `PromptVersion`.
+</ResponseField>
+
+<ResponseField name="max_tokens" type="int | None">
+  The maximum token limit hint inherited from the `PromptVersion`.
+</ResponseField>
+
+<ResponseField name="content_hash" type="str" required>
+  The `content_hash` inherited from the `PromptVersion`, carried through to
+  the prompt link so the dashboard can detect content drift between runs.
+</ResponseField>
+
+## Missing variable behaviour
+
+If any variable referenced in the template is absent from the `variables` dict passed to `compile_prompt` or `bind()`, the SDK raises a `ValueError` at compile time — before anything is sent to your LLM:
+
+```python
+version = PromptVersion(
+    id=...,
+    prompt_id=...,
+    version_number=1,
+    content="Hello {{ name }}.",
+    content_hash="sha256:...",
+)
+
+# Raises: ValueError: Missing prompt variables: name
+compiled = compile_prompt(version, {})
+```
+
+The error message lists every missing variable name in a comma-separated string so you can fix all omissions at once. No partial rendering occurs — the function is atomic.
+
+<Tip>
+  Because validation happens at compile time (not at LLM call time), missing
+  variable errors surface early in your request lifecycle, long before any
+  tokens are consumed or latency is incurred.
+</Tip>
+
+## Variable schema auto-extraction
+
+When a `PromptVersion` is created — either on the server or locally in code — NorthStar scans the template content and builds a `variables` list automatically. The extraction logic lives in `_prompt_template.py`:
+
+### `extract_variables(template)`
+
+Scans the template for both `{{ jinja }}` and `{python}` placeholder patterns and returns a **sorted list of unique variable names**:
+
+```python
+from northstar._prompt_template import extract_variables
+
+names = extract_variables("Hello {{ name }}, write {count} bullets for {{ topic }}.")
+# ["count", "name", "topic"]  — sorted alphabetically, deduplicated
+```
+
+### `variables_schema(template)`
+
+Wraps `extract_variables` and returns the full list of variable descriptor dicts that is stored on `PromptVersion.variables`:
+
+```python
+from northstar._prompt_template import variables_schema
+
+schema = variables_schema("Hello {{ name }}, write {count} bullets for {{ topic }}.")
+# [
+#   {"name": "count",  "type": "string", "required": True, "default": None},
+#   {"name": "name",   "type": "string", "required": True, "default": None},
+#   {"name": "topic",  "type": "string", "required": True, "default": None},
+# ]
+```
+
+All variables are typed as `"string"`, marked `required: True`, and have `default: None`. If the server returns a `PromptVersion` with an empty `variables` list, the SDK re-runs `variables_schema` locally via a Pydantic model validator so the schema is always populated before you call `compile`.
+
+### `render_template(template, variables)`
+
+The low-level render function used internally by `compile_prompt`. Calls `extract_variables` first to check for missing keys, then performs Jinja-style substitution followed by Python-style substitution on the result:
+
+```python
+from northstar._prompt_template import render_template
+
+result = render_template(
+    "Summarize {{ doc }} in {max_words} words.",
+    {"doc": "NorthStar traces agents.", "max_words": 50},
+)
+# "Summarize NorthStar traces agents. in 50 words."
+```
+
+You generally do not need to call `render_template` directly — use `compile_prompt` or `bind()` instead.
+
+## End-to-end example
+
+The following shows the full pull → compile → record flow, reading the model hint directly from the compiled prompt:
+
+```python
+import northstar
+
+with northstar.pull_prompt("summarizer", label="production") as prompt:
+    # Read model hint from the version stored in the dashboard
+    model = prompt.model or "gpt-4o"
+
+    with northstar.model_call("summarise", model=model) as llm:
+        with prompt.bind(
+            variables={"doc": doc_text, "max_words": 120},
+        ) as compiled:
+            llm.record_input_messages([
+                {"role": "system", "content": "You are a concise summariser."},
+                {"role": "user",   "content": compiled.content},
+            ])
+            response = call_llm(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a concise summariser."},
+                    {"role": "user",   "content": compiled.content},
+                ],
+            )
+            llm.record_output_message(response.choices[0].message.model_dump())
+            llm.record_usage(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+            )
+```
+
+When this block exits, NorthStar flushes a prompt link containing the `prompt_version_id`, the `content_hash`, and the exact `variable_values` used — making the trace fully reproducible from the dashboard.

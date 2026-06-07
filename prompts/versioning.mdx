@@ -1,0 +1,173 @@
+---
+title: "Prompt Versions and Labels"
+sidebarTitle: "Versioning"
+description: "Every prompt edit creates a new version with an incremented number and content hash. Labels like 'production' pin a named pointer to any version for safe rollout."
+---
+
+NorthStar treats every prompt edit as an immutable append. When you save a change to a prompt in the dashboard, the existing version is never modified — instead, a new `PromptVersion` record is created with an incremented `version_number`, a fresh `content_hash`, and a reference to its `parent_version_id`. This means the full edit history of any prompt is always available, old versions can be re-deployed by moving a label, and you can always determine exactly which content was active at the time a trace was recorded.
+
+## PromptVersion fields
+
+Each version is a Pydantic model with the following fields:
+
+<ResponseField name="id" type="UUID" required>
+  The unique identifier for this specific version. Referenced by
+  `CompiledPrompt.prompt_version_id` and stored in prompt links attached to
+  model call spans.
+</ResponseField>
+
+<ResponseField name="prompt_id" type="UUID" required>
+  The UUID of the parent `Prompt` this version belongs to. Stable across all
+  versions of the same prompt.
+</ResponseField>
+
+<ResponseField name="version_number" type="int" required>
+  A monotonically increasing integer assigned by the server. Version 1 is the
+  first version; each subsequent edit increments this by one. Useful for
+  quick comparisons and for pinning to a specific revision.
+</ResponseField>
+
+<ResponseField name="content" type="str" required>
+  The raw template string stored for this version. May contain `{{ jinja }}`
+  and/or `{python}` variable placeholders. This is the value rendered at
+  compile time.
+</ResponseField>
+
+<ResponseField name="model" type="str | None">
+  An optional model identifier hint (e.g. `"gpt-4o-mini"`) stored alongside
+  the template. When present, `CompiledPrompt` inherits this value so your
+  calling code can read the intended model from the compiled prompt rather than
+  hardcoding it.
+</ResponseField>
+
+<ResponseField name="temperature" type="float | None">
+  An optional sampling temperature hint stored with the version. Inherited by
+  `CompiledPrompt.temperature`.
+</ResponseField>
+
+<ResponseField name="max_tokens" type="int | None">
+  An optional maximum token limit hint. Inherited by
+  `CompiledPrompt.max_tokens`.
+</ResponseField>
+
+<ResponseField name="variables" type="list[dict]">
+  A list of variable descriptors auto-extracted from `content` at version
+  creation time. Each entry has the shape:
+
+  ```python
+  {"name": str, "type": "string", "required": True, "default": None}
+  ```
+
+  If this field arrives empty from the server, the SDK re-derives it locally
+  by running `variables_schema(content)` via a model validator. All detected
+  variables are marked `required: True` and `type: "string"` by default.
+</ResponseField>
+
+<ResponseField name="parent_version_id" type="UUID | None">
+  The `id` of the version this version was branched from. `None` for the
+  first version of a prompt. Forms a linked list that the dashboard uses to
+  render the version history timeline.
+</ResponseField>
+
+<ResponseField name="change_note" type="str | None">
+  An optional free-text note recorded at version creation time describing what
+  changed. Displayed in the dashboard history view alongside the diff.
+</ResponseField>
+
+<ResponseField name="content_hash" type="str" required>
+  A SHA-256 hash of the version's `content`, prefixed with `"sha256:"`. Used
+  to detect whether the prompt content active at trace time differs from the
+  content of the version currently stored — for example, if a label was moved
+  to a different version between runs.
+</ResponseField>
+
+## Immutability and the version chain
+
+Once a `PromptVersion` is created, its `content` field never changes. Every edit you make in the dashboard creates a brand-new version record. The chain looks like this:
+
+```
+v1 (parent_version_id: None)
+ └─► v2 (parent_version_id: v1.id)
+      └─► v3 (parent_version_id: v2.id)  ◄── "production" label
+```
+
+Because traces store the `prompt_version_id` at the time of compilation, you can always reconstruct the exact template that was active for any historical trace — even after the `"production"` label has been moved to v4 or v5.
+
+<Note>
+  The SDK never mutates a version received from the server. If the `variables`
+  list arrives empty, a Pydantic model validator re-derives it locally from the
+  `content` field using `variables_schema()`, but this does not create a new
+  server-side version.
+</Note>
+
+## Labels: named pointers to versions
+
+A label is a string key in the `Prompt.labels` dict that maps to a version UUID. Labels let you decouple deployment decisions from code changes — your code always asks for `label="production"`, and you control which version that resolves to entirely from the dashboard.
+
+```python
+# Always pulls whatever version the "production" label currently points to
+with northstar.pull_prompt("summarizer", label="production") as prompt:
+    compiled = prompt.compile(doc=doc_text, max_words=120)
+    ...
+```
+
+Common label conventions:
+
+| Label | Convention |
+|---|---|
+| `"production"` | The version currently serving live traffic |
+| `"staging"` | A candidate version under pre-release validation |
+| `"canary"` | A version receiving a small fraction of traffic |
+
+<Tip>
+  You can create any label name in the dashboard. There is no fixed set of
+  valid labels — `"production"` and `"staging"` are conventions, not reserved
+  words.
+</Tip>
+
+## Resolving a specific version by number
+
+If you need to pin to an exact version number rather than a label — for example in a deterministic eval run — pass `version` to `pull_prompt`:
+
+```python
+# Pull version 3 of the summarizer prompt exactly, regardless of labels
+with northstar.pull_prompt("summarizer", label="staging", version=3) as prompt:
+    compiled = prompt.compile(doc=doc_text, max_words=120)
+    ...
+```
+
+## Using content_hash for drift detection
+
+The `content_hash` field lets you detect whether the prompt content seen at trace time matches the version you expect. If a label is moved from v3 to v4 between two runs, the `content_hash` on the prompt links in those traces will differ, making it easy to group and compare results by actual content rather than version number alone.
+
+```python
+with northstar.pull_prompt("summarizer", label="production") as prompt:
+    # Inspect the hash before compiling
+    print(f"Running with content hash: {prompt.content_hash}")
+    compiled = prompt.compile(doc=doc_text, max_words=120)
+    ...
+```
+
+## Variable auto-extraction
+
+Variables are extracted from the template content automatically when a version is created. NorthStar scans the content for both `{{ jinja }}` and `{python}` placeholders and stores the result in `variables`. This means you never have to declare your variable schema manually — the schema is always in sync with the actual template content.
+
+```python
+version = PromptVersion(
+    id=...,
+    prompt_id=...,
+    version_number=1,
+    content="Hello {{ name }}, write {count} bullets for {{ topic }}.",
+    content_hash="sha256:...",
+)
+
+# Auto-populated by the model validator:
+# [
+#   {"name": "count",  "type": "string", "required": True, "default": None},
+#   {"name": "name",   "type": "string", "required": True, "default": None},
+#   {"name": "topic",  "type": "string", "required": True, "default": None},
+# ]
+print(version.variables)
+```
+
+Variables are returned in sorted alphabetical order. See [Templates](/prompts/templates) for details on the extraction logic and supported syntax.

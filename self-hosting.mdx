@@ -1,0 +1,186 @@
+---
+title: "Self-Host NorthStar on Supabase"
+sidebarTitle: "Self-Hosting"
+description: "Deploy NorthStar's ingest pipeline and database by applying the SQL migrations to a Supabase project and deploying the Edge Function. No external services required."
+---
+
+NorthStar's entire backend runs on Supabase: a private Postgres schema holds all trace data, a Deno/TypeScript Edge Function handles authenticated ingest, and Row Level Security enforces multi-tenant isolation. There are no third-party services to configure. All you need is a Supabase account and the Supabase CLI.
+
+## Prerequisites
+
+- A [Supabase](https://supabase.com) account
+- The [Supabase CLI](https://supabase.com/docs/guides/cli) installed and authenticated (`supabase login`)
+
+## Setup steps
+
+<Steps>
+
+### Create a Supabase project
+
+Log in to [supabase.com](https://supabase.com) and create a new project. Take note of the **project reference** (the short lowercase alphanumeric string visible in your project URL and dashboard settings — it looks like `abcdefghijklmnopqrst`). You will use this as `NORTHSTAR_PROJECT_ID`.
+
+Link the Supabase CLI to your new project from the repository root:
+
+```bash
+supabase link --project-ref <your-project-ref>
+```
+
+### Apply the database migrations
+
+NorthStar ships 26 migration files in the `migrations/` directory. Apply them all in order using `supabase db push`:
+
+```bash
+supabase db push
+```
+
+The CLI applies every file in `migrations/` that has not yet been applied, in lexicographic order. Here is what each batch provisions:
+
+| Files | What they create |
+|---|---|
+| `001_initial_schema.sql` | `private` schema, `private.projects`, `private.api_keys` |
+| `002–005` | `private.sessions`, `private.runs`, `private.spans`, `private.events` |
+| `006_ingest_rpc.sql` | Transactional `private.ingest_batch()` RPC, `private.resolve_api_key()`, Row Level Security policies |
+| `007_ingest_hardening.sql` | Payload size limits and additional ingest guards |
+| `008_one_api_key_per_project.sql` | Unique index enforcing one active API key per project |
+| `009_fix_request_project_id_search_path.sql` | Search path hardening for security definer functions |
+| `010–011` | `public.create_or_rotate_project_api_key()` RPC for key management |
+| `012–016` | Dashboard read-model views (traces, events, tool events, errors, costs) |
+| `017–020` | Eval datasets tables and dataset management RPCs |
+| `021_project_provider_keys.sql` | Encrypted provider keys for eval LLM judges |
+| `022_trace_spans_read_model.sql` | Span timeline read model for the trace viewer |
+| `023_session_errored_count.sql` | Session-level error aggregation |
+| `024_alert_rules_and_webhooks.sql` | `public.alert_rules` and `public.webhooks` tables and RPCs |
+| `025_prompts.sql` | Versioned prompt templates and label management |
+| `026_scores_feedback.sql` | `private.scores` table and bulk score ingestion |
+
+### Create a project row and generate an API key
+
+NorthStar authenticates ingest requests by hashing the bearer token with SHA-256 and looking up the hash in `private.api_keys`. **Only the hash is stored — the plaintext key is never persisted.**
+
+Use the `create_or_rotate_project_api_key` RPC (callable via the Supabase dashboard SQL editor with `service_role` permissions) to create your first project and API key:
+
+```sql
+-- 1. Generate a key on your local machine (keep the plaintext — you won't see it again)
+--    e.g. ns_$(openssl rand -hex 24)
+
+-- 2. Hash it
+--    echo -n "ns_<your-raw-key>" | sha256sum
+
+-- 3. Call the RPC (replace all placeholders)
+SELECT public.create_or_rotate_project_api_key(
+    gen_random_uuid(),           -- p_project_id: your project UUID
+    'My Agent',                  -- p_project_name
+    gen_random_uuid(),           -- p_key_id: UUID for this key record
+    '<sha256-hex-of-your-key>'   -- p_key_hash
+);
+```
+
+<Note>
+The function upserts the project by `id`, so you can call it again to rotate the key. The old key is immediately revoked (its `revoked_at` is set) and replaced with the new hash.
+</Note>
+
+### Deploy the Edge Function
+
+The ingest Edge Function lives in `supabase/functions/ingest-traces/`. Deploy it with JWT verification disabled — NorthStar uses its own Bearer token authentication via SHA-256 hash lookup, not Supabase JWTs:
+
+```bash
+supabase functions deploy ingest-traces --no-verify-jwt
+```
+
+NorthStar also ships a prompts Edge Function that the SDK and dashboard use to resolve versioned prompt templates. Deploy it as well:
+
+```bash
+supabase functions deploy prompts --no-verify-jwt
+```
+
+### Set SDK credentials
+
+Export your credentials as environment variables in your agent application:
+
+```bash
+export NORTHSTAR_API_KEY="ns_..."
+export NORTHSTAR_PROJECT_ID="<your-project-ref>"
+```
+
+Then initialize the SDK as normal:
+
+```python
+import northstar
+
+northstar.init(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    project="My Agent",
+    environment="production",
+)
+```
+
+The SDK derives the ingest URL automatically as `https://<project-id>.supabase.co/functions/v1/ingest-traces`.
+
+</Steps>
+
+## Architecture
+
+```
+Agent App (Python)
+    │
+    │  POST /functions/v1/ingest-traces
+    │  Authorization: Bearer ns_...
+    ▼
+Supabase Edge Function (Deno/TypeScript)
+  ├── 1. Extracts Bearer token from Authorization header
+  ├── 2. SHA-256 hashes the token
+  ├── 3. Calls private.resolve_api_key(hash) → project_id
+  ├── 4. Validates payload (UUIDs, enum values, ISO timestamps)
+  ├── 5. Stamps project_id on every session/run/span/event record
+  ├── 6. Topologically sorts spans (parents before children)
+  └── 7. Calls private.ingest_batch_with_prompt_links() in a transaction
+    │
+    ▼
+Postgres (private schema)
+  ├── private.sessions, private.runs
+  ├── private.spans,    private.events
+  ├── private.api_keys, private.scores
+  └── Row Level Security (multi-tenant isolation)
+```
+
+### Edge Function validation
+
+The Edge Function (`supabase/functions/ingest-traces/index.ts`) validates every field in the ingest payload before touching the database:
+
+- **UUIDs** — all `id`, `session_id`, `run_id`, `span_id`, and `project_id` fields must match the standard UUID format.
+- **ISO timestamps** — all `created_at`, `started_at`, and `ended_at` fields must be valid ISO 8601 timestamps with timezone.
+- **Enums** — `span.kind` must be one of `agent`, `workflow`, `model`, `tool`, `custom`; `run.status` and `span.status` must be `running`, `ok`, or `error`; `event.type` must be one of the defined event type literals.
+- **Unknown keys** — any unrecognized field in a session, run, span, event, score, or prompt link object is rejected with a `400` error.
+
+If validation fails, the entire batch is rejected with a descriptive error message and nothing is written to the database.
+
+## Row Level Security
+
+All six `private` schema tables have RLS enabled. The ingest RPC functions are `SECURITY DEFINER` — they run as the schema owner and bypass RLS for writes, but validate `project_id` programmatically to prevent cross-tenant writes. The `anon` and `authenticated` Supabase roles are explicitly denied access to the `private` schema, so trace data is never reachable through the public Supabase Data API.
+
+The dashboard connects using the `service_role` key, which has explicit `SELECT`, `INSERT`, and `UPDATE` grants on the private tables.
+
+## Idempotent ingestion
+
+Every entity is written with `ON CONFLICT (id) DO UPDATE`. If the SDK retries a batch (on `408`, `429`, `500`, `502`, `503`, or `504` status codes), duplicate records are safely merged rather than duplicated. This means re-sending a batch is always safe.
+
+## Provider keys for dashboard evals
+
+Dashboard rubric evals can use project-scoped API keys for OpenAI, Anthropic, OpenRouter, and other LiteLLM-compatible providers. These keys are stored encrypted in the database using a symmetric encryption key you control.
+
+Before saving any provider keys through the dashboard, set the `PROVIDER_KEYS_ENCRYPTION_KEY` environment variable on the dashboard server. Generate a 32-byte base64 key with:
+
+```bash
+openssl rand -base64 32
+```
+
+Set it as an environment variable wherever the dashboard is running:
+
+```bash
+export PROVIDER_KEYS_ENCRYPTION_KEY="<your-32-byte-base64-key>"
+```
+
+<Warning>
+If you change `PROVIDER_KEYS_ENCRYPTION_KEY` after provider keys have been saved, the existing encrypted keys will become unreadable. Back up the key value and treat it as a secret.
+</Warning>

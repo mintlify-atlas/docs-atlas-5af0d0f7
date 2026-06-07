@@ -1,0 +1,257 @@
+---
+title: "Loading and Structuring Eval Datasets"
+sidebarTitle: "Datasets"
+description: "Create eval datasets as JSON or JSONL files. Each case defines an input, expected outcomes, and optional metrics. Load them with Dataset.from_path() or Dataset.from_records()."
+---
+
+A dataset is the starting point for every eval run. It holds the collection of agent conversations you want to evaluate — each one paired with the expected outcomes NorthStar will grade against. Without a dataset there is nothing to evaluate; with a well-structured one, NorthStar can tell you exactly which cases pass, which fail, and why. Datasets can be loaded from JSON or JSONL files on disk, or constructed in memory from Python dicts. The `Dataset` class is iterable and supports `len()`, so it integrates directly with `EvalSuite.run()`.
+
+## EvalCase structure
+
+Each entry in a dataset is an `EvalCase`. Only `id` and `messages` are required — every other field is optional and defaults gracefully.
+
+<ResponseField name="id" type="str" required>
+  Unique identifier for the case. Appears in all result objects and log output.
+</ResponseField>
+
+<ResponseField name="input" type="Any">
+  The original user input that triggered the agent run. Not graded directly — use `messages` for the conversation transcript.
+</ResponseField>
+
+<ResponseField name="messages" type="list[dict]" required>
+  The full conversation transcript in OpenAI chat format. NorthStar normalizes this into tool calls, tool outputs, and the final assistant response automatically.
+</ResponseField>
+
+<ResponseField name="expected" type="EvalExpected">
+  The expected outcomes. All fields are optional; graders skip automatically when their field is absent. See the full field reference below.
+</ResponseField>
+
+<ResponseField name="metrics" type="EvalMetrics">
+  Run-time measurements. Accepted fields are `latency_ms` (float) and `cost_usd` (float). Required if you use `LatencyUnder` or `CostUnder` graders.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict">
+  Arbitrary key/value pairs. Passed through to results and available in custom graders.
+</ResponseField>
+
+<ResponseField name="trace" type="dict">
+  Raw NorthStar trace payload. Required if you use trace graders (`BadToolFailureRecovery`, `UnnecessaryToolLoop`, etc.).
+</ResponseField>
+
+### EvalExpected fields
+
+<Accordion title="View all EvalExpected fields">
+
+<ResponseField name="goal" type="str">
+  A plain-language description of what a correct response should achieve. Used by `RubricJudge` as the primary grading criterion when no rubric is provided.
+</ResponseField>
+
+<ResponseField name="rubric" type="str">
+  A detailed grading rubric passed verbatim to `RubricJudge`. Takes precedence over the judge-level rubric when both are set.
+</ResponseField>
+
+<ResponseField name="ground_truth" type="str">
+  The canonical correct answer. `GroundTruthMatch` checks whether the final response contains this string (case-insensitive, normalized whitespace).
+</ResponseField>
+
+<ResponseField name="context" type="list[str]">
+  Reference passages or retrieved documents. Required by `FaithfulnessJudge` when no tool outputs are present.
+</ResponseField>
+
+<ResponseField name="tool_sequence" type="list[str]">
+  The exact ordered list of tool names the agent should call. `ToolSequence` checks for an exact match against the actual call order.
+</ResponseField>
+
+<ResponseField name="tool_arguments" type="list[ExpectedToolArguments]">
+  Expected tool arguments, as a list of `{name, arguments}` objects. `ToolArgumentsMatch` checks that every listed tool was called with at least the expected argument subset.
+</ResponseField>
+
+<ResponseField name="required_tools" type="list[str]">
+  Tool names that must appear in the run's tool calls. `RequiredTools` fails if any are missing.
+</ResponseField>
+
+<ResponseField name="forbidden_tools" type="list[str]">
+  Tool names that must not appear. `ForbiddenTools` fails if any are called.
+</ResponseField>
+
+<ResponseField name="max_tool_calls" type="int">
+  Maximum total number of tool calls allowed. `MaxToolCalls` fails if the actual count exceeds this.
+</ResponseField>
+
+<ResponseField name="contains" type="list[str]">
+  Phrases that must appear in the final response (case-insensitive). `Contains` fails if any are missing.
+</ResponseField>
+
+<ResponseField name="not_contains" type="list[str]">
+  Phrases that must not appear in the final response. `NotContains` fails if any are found.
+</ResponseField>
+
+<ResponseField name="require_tool_output_reference" type="bool">
+  When `true`, `ToolOutputReferenced` checks that the final response is sufficiently grounded in tool output text (overlap threshold: 0.35).
+</ResponseField>
+
+<ResponseField name="max_latency_ms" type="float">
+  Maximum allowed run latency in milliseconds. Requires `metrics.latency_ms` to be set.
+</ResponseField>
+
+<ResponseField name="max_cost_usd" type="float">
+  Maximum allowed total cost in USD. Requires `metrics.cost_usd` to be set.
+</ResponseField>
+
+<ResponseField name="trace" type="TraceExpected">
+  Trace-level constraints used by trace graders. Fields include `max_repeated_tool_calls`, `allowed_state_transitions`, `relevant_retrieval_ids`, `min_retrieval_precision`, `min_retrieval_recall`, and `max_step_cost_usd`.
+</ResponseField>
+
+</Accordion>
+
+## JSON dataset format
+
+The simplest dataset is a JSON array of case objects. Each case must have `id` and `messages`; all other fields are optional.
+
+```json dataset.json
+[
+  {
+    "id": "case-001",
+    "input": "What is the capital of France?",
+    "messages": [
+      { "role": "user", "content": "What is the capital of France?" },
+      { "role": "assistant", "content": "The capital of France is Paris." }
+    ],
+    "expected": {
+      "goal": "Correctly identify Paris as the capital of France.",
+      "ground_truth": "Paris",
+      "contains": ["Paris"],
+      "not_contains": ["London", "Berlin"]
+    }
+  },
+  {
+    "id": "case-002",
+    "input": "Find the refund policy.",
+    "messages": [
+      { "role": "user", "content": "Find the refund policy." },
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+              "name": "search_docs",
+              "arguments": "{\"query\": \"refund policy\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "name": "search_docs",
+        "content": "Refunds are available for 30 days."
+      },
+      {
+        "role": "assistant",
+        "content": "Refunds are available for 30 days after purchase."
+      }
+    ],
+    "expected": {
+      "required_tools": ["search_docs"],
+      "tool_sequence": ["search_docs"],
+      "tool_arguments": [
+        { "name": "search_docs", "arguments": { "query": "refund policy" } }
+      ],
+      "require_tool_output_reference": true,
+      "max_tool_calls": 2,
+      "ground_truth": "refunds are available for 30 days"
+    },
+    "metrics": {
+      "latency_ms": 740,
+      "cost_usd": 0.0009
+    }
+  }
+]
+```
+
+<Note>
+  You can also wrap cases in an object with a `"cases"` key — `Dataset.from_json()` accepts both formats. A file with a single case object (not wrapped in an array) is accepted too.
+</Note>
+
+## Loading datasets
+
+<CodeGroup>
+```python from_path (auto-detect)
+from northstar.evals import Dataset
+
+# Automatically picks JSON or JSONL based on file extension
+dataset = Dataset.from_path("dataset.json")
+dataset = Dataset.from_path("dataset.jsonl")
+```
+
+```python from_json / from_jsonl
+from northstar.evals import Dataset
+
+# Explicit format loaders
+dataset = Dataset.from_json("dataset.json")
+dataset = Dataset.from_jsonl("dataset.jsonl")
+```
+
+```python from_records (in-memory)
+from northstar.evals import Dataset
+
+records = [
+    {
+        "id": "case-001",
+        "messages": [
+            {"role": "assistant", "content": "The capital of France is Paris."}
+        ],
+        "expected": {"ground_truth": "Paris"},
+    }
+]
+
+dataset = Dataset.from_records(records)
+```
+</CodeGroup>
+
+<Warning>
+  `Dataset.from_path()` raises `ValueError` for unsupported file extensions. Only `.json` and `.jsonl` are accepted.
+</Warning>
+
+## JSONL format
+
+JSONL (newline-delimited JSON) works well for large datasets and streaming writes. Each non-empty line must be a valid JSON object representing one `EvalCase`.
+
+```jsonl dataset.jsonl
+{"id": "case-001", "messages": [{"role": "assistant", "content": "Paris"}], "expected": {"ground_truth": "Paris"}}
+{"id": "case-002", "messages": [{"role": "assistant", "content": "Refunds are 30 days."}], "expected": {"contains": ["30 days"]}}
+{"id": "case-003", "messages": [{"role": "assistant", "content": "Contact support."}]}
+```
+
+Blank lines are skipped. A parse error on any line raises `ValueError` with the line number included in the message.
+
+## Iterating and measuring a dataset
+
+`Dataset` is iterable and supports `len()`. You can inspect cases before passing the dataset to an eval suite.
+
+```python
+from northstar.evals import Dataset
+
+dataset = Dataset.from_path("dataset.json")
+
+print(f"Dataset has {len(dataset)} cases")
+
+for case in dataset:
+    print(case.id, "→", case.expected.goal)
+```
+
+## Passing a dataset to EvalSuite
+
+```python
+from northstar.evals import Dataset, EvalSuite
+
+dataset = Dataset.from_path("dataset.json")
+result = EvalSuite().run(dataset)
+
+print(f"Pass rate: {result.pass_rate:.0%} ({result.passed_cases}/{result.evaluated_cases})")
+```
+
+`EvalSuite.run()` iterates the dataset once, evaluating each case against every configured grader. See the [Graders](/evals/graders) and [LLM Judges](/evals/llm-judges) pages for details on what each grader checks.

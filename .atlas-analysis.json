@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "NorthStar",
+  "projectType": "saas",
+  "projectName": "NorthStar",
+  "projectDescription": "An observability, debugging, and evaluation platform for AI agents that records traces, spans, LLM costs, and evals without changing application control flow.",
   "theme": "luma",
-  "colors": {
-    "primary": "#6366F1",
-    "light": "#EEF2FF",
-    "dark": "#312E81"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/sidmanale643/northstar"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/sidmanale643/northstar"
-    }
-  },
+  "primaryColor": "#6366F1",
+  "lightColor": "#EEF2FF",
+  "darkColor": "#312E81",
   "navigation": {
     "tabs": [
       {
@@ -104,5 +92,39 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Automatic instrumentation for OpenAI and Anthropic clients",
+    "Hierarchical trace/span/event data model with context propagation",
+    "Versioned prompt management with Jinja/Python template support",
+    "Deterministic and LLM-based evaluation graders (rubric, faithfulness, tool sequence, regex, Python/TypeScript code graders)",
+    "LLM cost and token tracking via LiteLLM pricing",
+    "Background worker queue with configurable batching and retry",
+    "Sensitive field redaction before data transmission",
+    "Multi-project dashboard with real-time trace viewer, playground, and alert rules"
+  ],
+  "publicApiSurface": [
+    "northstar.init()",
+    "northstar.auto_instrument()",
+    "northstar.trace()",
+    "northstar.observe()",
+    "northstar.span()",
+    "northstar.model_call()",
+    "northstar.log_event()",
+    "northstar.log_metric()",
+    "northstar.log_metadata()",
+    "northstar.flush()",
+    "northstar.current_trace_id()",
+    "northstar.LLMService",
+    "northstar.Northstar (low-level client)",
+    "northstar.evals.Dataset",
+    "northstar.evals.EvalSuite",
+    "northstar.evals.graders (RubricJudge, FaithfulnessJudge, ToolSequence, RegexGrader, PythonCodeGrader, TypeScriptCodeGrader, etc.)",
+    "northstar.Prompt / PromptVersion / CompiledPrompt",
+    "northstar.Replay / ReplayDiff / ReplayStep",
+    "northstar.pricing",
+    "northstar.CaptureOptions",
+    "northstar.SpanKind",
+    "northstar.Score"
+  ]
 }

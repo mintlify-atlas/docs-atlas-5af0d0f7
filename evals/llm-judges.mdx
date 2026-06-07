@@ -1,0 +1,340 @@
+---
+title: "LLM Judges for Qualitative Evaluation"
+sidebarTitle: "LLM Judges"
+description: "Use RubricJudge and FaithfulnessJudge to grade agent responses with an LLM. Configure scoring mode, passing threshold, and the judge model from any LiteLLM-supported provider."
+---
+
+Deterministic graders can tell you whether the right tools were called or whether the response contains an expected phrase, but they cannot tell you whether the response is actually good. LLM judges fill that gap by prompting a language model to evaluate the agent's final response against a rubric, a stated goal, or a faithfulness criterion. NorthStar ships two general-purpose judges — `RubricJudge` and `FaithfulnessJudge` — and two trace-level judges — `HallucinatedToolResultJudge` and `PlanningActionMismatchJudge` — all built on [LiteLLM](https://docs.litellm.ai/) so they work with any supported provider.
+
+## RubricJudge
+
+`RubricJudge` prompts the judge model to score the agent's final response against a goal or a custom rubric. It supports both numeric and binary scoring modes, and its passing threshold is configurable.
+
+### Constructor
+
+<ParamField path="name" type="str" required>
+  The grader name that appears in `GradeResult.name`.
+</ParamField>
+
+<ParamField path="model" type="str" default="openrouter/deepseek/deepseek-v4-flash">
+  Any model string accepted by LiteLLM (e.g., `"gpt-4o"`, `"anthropic/claude-3-5-sonnet-20241022"`, `"openrouter/deepseek/deepseek-v4-flash"`).
+</ParamField>
+
+<ParamField path="rubric" type="str">
+  A custom grading rubric applied to all cases. When omitted, the judge falls back to `expected.rubric`, then `expected.goal`, then a generic pass-if-goal-satisfied prompt.
+</ParamField>
+
+<ParamField path="completion_fn" type="Callable">
+  An optional callable that replaces the LiteLLM `completion()` call. Useful for testing with a mock or for using a custom inference backend. When set, the prerequisite API key check is skipped.
+</ParamField>
+
+<ParamField path="threshold" type="float" default="0.5">
+  The minimum normalized score required to pass (when using numeric scoring). Ignored when you pass an explicit `scoring` config with `passing_score` set.
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0.0">
+  Sampling temperature passed to the judge model. Keep at `0.0` for deterministic grading.
+</ParamField>
+
+<ParamField path="scoring" type="JudgeScoringConfig">
+  Full scoring configuration. When omitted, defaults to numeric mode with `min_score=0.0`, `max_score=1.0`, and `passing_score=threshold`.
+</ParamField>
+
+### Basic example
+
+```python
+from northstar.evals import Dataset, EvalSuite
+from northstar.evals.graders import RubricJudge
+
+dataset = Dataset.from_records([
+    {
+        "id": "case-001",
+        "messages": [
+            {"role": "assistant", "content": "Refunds are available for 30 days after purchase."}
+        ],
+        "expected": {
+            "goal": "Explain the refund policy clearly and completely.",
+        },
+    }
+])
+
+suite = EvalSuite(graders=[
+    RubricJudge(
+        "answer_quality",
+        model="openai/gpt-4o-mini",
+        rubric=(
+            "Pass if the response states the refund window in days. "
+            "Fail if it is vague, incomplete, or contradicts the policy."
+        ),
+        threshold=0.7,
+    )
+])
+
+result = suite.run(dataset)
+grade = result.case_results[0].grades[0]
+print(grade.status, grade.score, grade.feedback)
+```
+
+### How RubricJudge prompts the model
+
+The judge receives a system prompt instructing it to act as a strict evaluator, followed by a user message containing a JSON object with these keys:
+
+- `goal` — from `expected.goal`
+- `rubric` — from the judge-level or case-level rubric
+- `ground_truth` — from `expected.ground_truth`
+- `final_response` — the last assistant message
+- `tool_calls` — list of tool call objects from the run
+- `tool_outputs` — list of tool output objects from the run
+- `context` — from `expected.context`
+
+The system prompt includes instructions to judge only the supplied fields, not to reward unsupported claims, and to return only a JSON object.
+
+### JudgeScoringConfig
+
+`JudgeScoringConfig` controls how the judge's output is interpreted.
+
+<ParamField path="mode" type="str" required>
+  `"numeric"` — the judge returns a score in `[min_score, max_score]`, which is normalized to `[0, 1]`. `"binary"` — the judge returns a `passed` boolean.
+</ParamField>
+
+<ParamField path="min_score" type="float" default="0.0">
+  Lower bound of the numeric scale. Only used when `mode="numeric"`.
+</ParamField>
+
+<ParamField path="max_score" type="float" default="1.0">
+  Upper bound of the numeric scale.
+</ParamField>
+
+<ParamField path="passing_score" type="float">
+  The raw score at or above which the grade passes. Required when `mode="numeric"`. Defaults to `max_score` when `mode="binary"`.
+</ParamField>
+
+<ParamField path="labels" type="dict[float, str]">
+  Optional mapping of raw score values to label strings (e.g., `{4: "good", 5: "excellent"}`).
+</ParamField>
+
+```python
+from northstar.evals import JudgeScoringConfig
+from northstar.evals.graders import RubricJudge
+
+# Numeric scoring on a 0–5 scale, passing at 4
+judge = RubricJudge(
+    "answer_quality",
+    rubric="Grade correctness, faithfulness, and clarity.",
+    scoring=JudgeScoringConfig(
+        mode="numeric",
+        min_score=0,
+        max_score=5,
+        passing_score=4,
+        labels={4: "good", 5: "excellent"},
+    ),
+)
+
+# Binary scoring — judge returns passed: true/false
+safety_gate = RubricJudge(
+    "safety_gate",
+    rubric="Pass only if the answer avoids unsafe instructions.",
+    scoring=JudgeScoringConfig(mode="binary"),
+)
+```
+
+<Note>
+  `passing_score` is required for `mode="numeric"` — omitting it raises a `ValueError` at construction time.
+</Note>
+
+## FaithfulnessJudge
+
+`FaithfulnessJudge` is a subclass of `RubricJudge` with a faithfulness-specific system prompt. It checks whether the agent's final response is grounded in the provided context or tool outputs, penalizing claims that are not supported by those sources — even when they sound plausible.
+
+### Constructor
+
+`FaithfulnessJudge` accepts the same arguments as `RubricJudge` minus `rubric` (the faithfulness rubric is built-in). Key defaults differ:
+
+<ParamField path="name" type="str" default="faithfulness_judge">
+  Default name used when not overridden.
+</ParamField>
+
+<ParamField path="threshold" type="float" default="0.7">
+  Higher default than `RubricJudge` — faithfulness is a stricter criterion.
+</ParamField>
+
+### When FaithfulnessJudge is skipped
+
+`FaithfulnessJudge` returns `SKIPPED` when neither `expected.context` nor any tool outputs are present in the run. It requires grounding material to evaluate against.
+
+```python
+from northstar.evals import Dataset, EvalSuite
+from northstar.evals.graders import FaithfulnessJudge
+
+dataset = Dataset.from_records([
+    {
+        "id": "case-001",
+        "messages": [
+            {"role": "assistant", "content": "Refunds include crypto rebates and store vouchers."}
+        ],
+        "expected": {
+            "context": ["Refunds are available for 30 days after purchase."]
+        },
+    }
+])
+
+suite = EvalSuite(graders=[FaithfulnessJudge(model="openai/gpt-4o-mini")])
+result = suite.run(dataset)
+
+grade = result.case_results[0].grades[0]
+print(grade.status)    # "failed" — "crypto rebates" not supported by context
+print(grade.feedback)  # Actionable explanation from the judge
+```
+
+## Trace LLM judges
+
+Two LLM judges operate specifically on trace DAG data and are included in the `"trace"` grader plan.
+
+### HallucinatedToolResultJudge
+
+Prompts the judge to verify that claims in the final response are supported by observed `tool_result` events in the trace. Fails when the response contains information that was not returned by any tool.
+
+```python
+from northstar.evals.graders import HallucinatedToolResultJudge
+
+judge = HallucinatedToolResultJudge(
+    model="openai/gpt-4o-mini",
+    threshold=0.7,
+)
+```
+
+### PlanningActionMismatchJudge
+
+Prompts the judge to verify that the tools and actions taken later in the trace are consistent with any planning or reasoning events that appeared earlier. Fails when the agent's actions contradict its stated plan.
+
+```python
+from northstar.evals.graders import PlanningActionMismatchJudge
+
+judge = PlanningActionMismatchJudge(
+    model="openai/gpt-4o-mini",
+    threshold=0.7,
+)
+```
+
+Both trace judges skip automatically when `run.trace` is `None`.
+
+### trace_graders() convenience function
+
+`trace_graders()` returns all 9 trace graders (7 deterministic + 2 LLM judges) configured with the same judge model and optional `completion_fn`.
+
+```python
+from northstar.evals import EvalSuite
+from northstar.evals.graders import trace_graders
+
+suite = EvalSuite(
+    graders=trace_graders(
+        judge_model="openai/gpt-4o-mini",
+    )
+)
+```
+
+## Authentication
+
+LLM judges check for the required API key environment variable before making any inference calls. If the key is missing, a `JudgeAuthenticationError` is raised immediately with a clear message identifying the exact environment variable to set.
+
+```python
+from northstar.evals.graders import JudgeAuthenticationError, RubricJudge
+
+try:
+    RubricJudge("quality", model="openrouter/openai/gpt-4o").grade(case, run)
+except JudgeAuthenticationError as exc:
+    print(exc)
+    # Cannot grade with model 'openrouter/openai/gpt-4o': environment variable
+    # OPENROUTER_API_KEY is not set. Set OPENROUTER_API_KEY to authenticate
+    # with openrouter before running this eval.
+```
+
+When `completion_fn` is provided, the prerequisite check is bypassed entirely — useful for tests and custom inference backends.
+
+### Supported providers
+
+| Provider | Environment variable |
+|---|---|
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| Azure | `AZURE_API_KEY` |
+| Gemini / Google | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| Cohere | `COHERE_API_KEY` |
+| Together | `TOGETHER_API_KEY` |
+| Replicate | `REPLICATE_API_KEY` |
+| Perplexity | `PERPLEXITY_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Fireworks | `FIREWORKS_API_KEY` |
+| HuggingFace | `HUGGINGFACE_API_KEY` |
+| Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS` |
+
+Providers not in this table (such as local Ollama models) are accepted without any key check.
+
+## Injecting a mock for testing
+
+<Tip>
+  Use `completion_fn` to inject a mock completion function during testing. This eliminates network calls and API costs while exercising your eval logic.
+</Tip>
+
+```python
+import json
+from northstar.evals import Dataset, EvalSuite
+from northstar.evals.graders import RubricJudge
+
+def mock_completion(**kwargs):
+    """Always returns a passing numeric score."""
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({
+                        "score": 0.9,
+                        "reason": "The response satisfies the goal.",
+                        "feedback": "No changes needed.",
+                        "evidence": ["30 days"],
+                    })
+                }
+            }
+        ]
+    }
+
+dataset = Dataset.from_records([
+    {
+        "id": "case-001",
+        "messages": [{"role": "assistant", "content": "Refunds are 30 days."}],
+        "expected": {"goal": "Explain the refund window."},
+    }
+])
+
+suite = EvalSuite(graders=[
+    RubricJudge("quality", completion_fn=mock_completion, threshold=0.8)
+])
+result = suite.run(dataset)
+assert result.pass_rate == 1.0
+```
+
+## Error handling
+
+When a judge call fails, `EvalSuite` catches the exception and converts it to a `FAILED` `GradeResult` with an actionable `reason` and `feedback` rather than crashing the entire eval run.
+
+<Warning>
+  **Rate limits (429):** The judge will be marked `FAILED` with a message advising you to wait or switch to a model with higher rate limits. NorthStar does not automatically retry rate-limited judge calls.
+</Warning>
+
+<Warning>
+  **Context window exceeded:** If the combined rubric, final response, and tool outputs exceed the judge model's context window, the grade fails with a message advising you to shorten the inputs or pick a model with a larger context window.
+</Warning>
+
+Common error scenarios and their `GradeResult.reason` values:
+
+| Error type | `reason` message |
+|---|---|
+| Missing API key (401) | `"Judge model '…' is not authenticated."` |
+| Rate limit (429) | `"Judge model '…' is rate-limited."` |
+| Context window exceeded | `"Judge model '…' exceeded its context window."` |
+| Request timeout | `"Judge model '…' timed out."` |
+| Model not found (404) | `"Judge model '…' was not found."` |
+| Invalid JSON response | `"LLM judge returned invalid JSON."` |

@@ -1,0 +1,157 @@
+---
+title: "northstar.trace() — Trace a Function or Block"
+sidebarTitle: "trace()"
+description: "Wrap a function or code block with northstar.trace() to create a top-level trace run. Supports decorator and context manager forms, and captures input/output automatically."
+---
+
+`northstar.trace()` marks the outermost boundary of a single agent invocation, creating a **Run** record in NorthStar. Every span, event, metric, and log call made while the trace is active is associated with that run. The function works in two forms: as a **decorator** (applied to a function) and as a **context manager** (used with `with`). Both forms automatically capture inputs, outputs, latency, and exceptions, and both support `async` functions.
+
+## Function signature
+
+```python
+def trace(
+    name: str | None = None,
+    *,
+    input: Any = _UNSET,
+    metadata: Mapping[str, Any] | None = None,
+    tags: Iterable[str] | None = None,
+    capture_input: bool | None = None,
+    capture_output: bool | None = None,
+) -> _TraceFactory
+```
+
+## Parameters
+
+<ParamField body="name" type="str | None" default="None">
+  Display name for this run in the NorthStar dashboard. When used as a decorator and `name` is omitted, the wrapped function's `__name__` is used automatically.
+</ParamField>
+
+<ParamField body="input" type="Any" default="(not set)">
+  Explicit input value to record for this run. When provided to the **context manager** form, it is stored as the `user_input` event. When used as a **decorator**, NorthStar captures the function's arguments automatically and `input` is not needed.
+</ParamField>
+
+<ParamField body="metadata" type="Mapping[str, Any] | None" default="None">
+  Arbitrary key-value pairs merged into the run's metadata. Useful for routing, filtering, or annotating runs in the dashboard. Project name and environment (set in `init()`) are always included automatically.
+</ParamField>
+
+<ParamField body="tags" type="Iterable[str] | None" default="None">
+  A list of string tags stored under `metadata["tags"]` on the run. Tags appear in the dashboard and can be used for filtering.
+</ParamField>
+
+<ParamField body="capture_input" type="bool | None" default="None">
+  Override the global `capture_inputs` setting from `init()` for this trace only. Set to `False` to prevent function arguments from being recorded as `user_input` events.
+</ParamField>
+
+<ParamField body="capture_output" type="bool | None" default="None">
+  Override the global `capture_outputs` setting from `init()` for this trace only. Set to `False` to prevent return values from being recorded as `final_response` events.
+</ParamField>
+
+## Decorator form
+
+Apply `@northstar.trace(...)` above a function definition. When the function is called, a new trace run is started, arguments are captured as input, the return value is captured as output, and the run is finished and flushed when the function returns. Exceptions are recorded as errors on the run and re-raised.
+
+```python
+import northstar
+
+@northstar.trace("research-agent", tags=["rag"])
+def run_agent(query: str) -> str:
+    docs = retrieve_docs(query)
+    return generate_answer(query, docs)
+```
+
+<Note>
+  When `name` is omitted from the decorator, the function's `__name__` is used
+  as the run name. For example, `@northstar.trace()` on a function called
+  `run_agent` produces a run named `"run_agent"`.
+</Note>
+
+## Context manager form
+
+Use `with northstar.trace(...) as trace:` when you need explicit control — for example, to call `trace.set_output()` with a value computed at the end of a block, or to attach structured logging mid-run.
+
+```python
+import northstar
+
+with northstar.trace("research-agent", input={"query": query}) as trace:
+    with northstar.span("retrieval"):
+        docs = retrieve_docs(query)
+    answer = generate_answer(query, docs)
+    trace.set_output(answer)
+```
+
+## `_TraceHandle` methods
+
+Inside the `with` block, the context manager yields a `_TraceHandle` (or a silent no-op stub if the SDK is disabled). The handle exposes these methods:
+
+<ResponseField name="set_output(output)" type="method">
+  Records `output` as the `final_response` event for this run. Call this once at the end of the block to capture the agent's answer. Respects the `capture_output` flag.
+
+  ```python
+  trace.set_output({"answer": answer, "sources": sources})
+  ```
+</ResponseField>
+
+<ResponseField name="log_event(name, data)" type="method">
+  Attaches a named custom event to the run. Equivalent to calling `northstar.log_event()` at trace scope.
+
+  ```python
+  trace.log_event("fallback_triggered", {"reason": "timeout"})
+  ```
+</ResponseField>
+
+<ResponseField name="log_metric(name, value)" type="method">
+  Records a numeric metric on the run. `value` must be a real number — `bool` is rejected.
+
+  ```python
+  trace.log_metric("confidence", 0.91)
+  ```
+</ResponseField>
+
+<ResponseField name="log_metadata(metadata)" type="method">
+  Merges `metadata` into the run's metadata dictionary.
+
+  ```python
+  trace.log_metadata({"user_id": "u_123", "plan": "pro"})
+  ```
+</ResponseField>
+
+## Async support
+
+`@northstar.trace()` works transparently on `async def` functions. The trace is started before the coroutine is awaited and finished after it resolves, preserving the correct span context across `await` boundaries.
+
+```python
+@northstar.trace("async-agent")
+async def run_agent(query: str) -> str:
+    docs = await retrieve_docs_async(query)
+    return await generate_answer_async(query, docs)
+```
+
+## Disabling input/output capture per trace
+
+```python
+@northstar.trace("payment-agent", capture_input=False, capture_output=False)
+def process_payment(card_number: str, amount: float) -> dict:
+    # card_number will NOT be recorded even without redact_keys
+    ...
+```
+
+## Full example
+
+```python
+import northstar
+
+northstar.init(
+    api_key="ns_...",
+    project_id="myproject",
+    project="Support Agent",
+    environment="production",
+)
+
+@northstar.trace("support-agent", tags=["production"], metadata={"team": "cx"})
+def handle_ticket(ticket_id: str, question: str) -> str:
+    northstar.log_metadata({"ticket_id": ticket_id})
+    docs = retrieve_docs(question)
+    northstar.log_metric("docs_retrieved", len(docs))
+    answer = generate_answer(question, docs)
+    return answer
+```

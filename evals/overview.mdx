@@ -1,0 +1,198 @@
+---
+title: "Evaluating AI Agent Runs with NorthStar"
+sidebarTitle: "Overview"
+description: "NorthStar's eval framework runs deterministic graders and LLM judges over a dataset of agent runs. Define expected outcomes, run EvalSuite, and review pass rates by case."
+---
+
+The NorthStar eval framework gives you a structured way to measure whether your AI agent is behaving correctly — before it reaches production and after every change you make to it. You define a dataset of representative inputs, attach expected outcomes to each case, choose a grader plan, and run `EvalSuite`. NorthStar evaluates every case against every grader, skips checks that are not relevant (instead of failing them), and returns a summary of pass rates broken down by case and grader. Use evals to catch regressions in tool usage, output quality, latency budgets, and cost — all from a single `suite.run(dataset)` call.
+
+## End-to-end example
+
+The example below loads a JSON dataset, runs the default `"deterministic"` plan, and prints a summary of the results.
+
+<Steps>
+  <Step title="Install the eval extras">
+    LLM judges require LiteLLM. Install the optional pricing extras if you plan to use `RubricJudge` or `FaithfulnessJudge`.
+
+    ```bash
+    uv add 'northstar-ai[pricing]'
+    ```
+
+    The deterministic graders have no extra dependencies.
+  </Step>
+
+  <Step title="Create a dataset file">
+    Save agent message transcripts as a JSON array. Each case must have an `id` and a `messages` array that matches the OpenAI chat format.
+
+    ```json dataset.json
+    [
+      {
+        "id": "case-001",
+        "input": "What is the refund policy?",
+        "messages": [
+          { "role": "user", "content": "What is the refund policy?" },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                  "name": "search_docs",
+                  "arguments": "{\"query\": \"refund policy\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "search_docs",
+            "content": "Refunds are available for 30 days after purchase."
+          },
+          {
+            "role": "assistant",
+            "content": "Refunds are available for 30 days after purchase."
+          }
+        ],
+        "expected": {
+          "goal": "Correctly explain the refund policy.",
+          "ground_truth": "refunds are available for 30 days",
+          "required_tools": ["search_docs"],
+          "tool_sequence": ["search_docs"],
+          "contains": ["30 days"],
+          "require_tool_output_reference": true,
+          "max_tool_calls": 2
+        },
+        "metrics": {
+          "latency_ms": 820,
+          "cost_usd": 0.0012
+        }
+      }
+    ]
+    ```
+  </Step>
+
+  <Step title="Run the eval suite">
+    ```python
+    from northstar.evals import Dataset, EvalSuite
+
+    # Load the dataset — auto-detects .json vs .jsonl
+    dataset = Dataset.from_path("dataset.json")
+
+    # Run with the default deterministic plan
+    suite = EvalSuite()
+    result = suite.run(dataset)
+
+    print(f"Pass rate: {result.pass_rate:.0%}")
+    print(f"Passed:    {result.passed_cases} / {result.evaluated_cases}")
+    print(f"Skipped grades: {result.skipped_grades}")
+
+    for case_result in result.case_results:
+        print(f"\n[{case_result.status}] {case_result.case_id}")
+        for grade in case_result.grades:
+            if grade.status != "skipped":
+                print(f"  {grade.name}: {grade.status} — {grade.reason}")
+    ```
+  </Step>
+</Steps>
+
+## Grader plans
+
+`EvalSuite` accepts a `plan` argument that selects a built-in bundle of graders. You can also pass an explicit `graders` list to override the plan entirely.
+
+<CodeGroup>
+```python Deterministic
+from northstar.evals import EvalSuite
+
+# 11 deterministic graders covering tools, output, latency, and cost.
+# No LLM calls — fast and free to run on CI.
+suite = EvalSuite(plan="deterministic")
+```
+
+```python Quality
+from northstar.evals import EvalSuite
+
+# Deterministic graders + RubricJudge.
+# RubricJudge grades free-form output against expected.goal / expected.rubric.
+suite = EvalSuite(plan="quality", judge_model="openrouter/deepseek/deepseek-v4-flash")
+```
+
+```python Agentic
+from northstar.evals import EvalSuite
+
+# Deterministic graders + FaithfulnessJudge.
+# FaithfulnessJudge checks that the final response is grounded in tool outputs.
+suite = EvalSuite(plan="agentic")
+```
+
+```python Trace
+from northstar.evals import EvalSuite
+
+# 7 deterministic trace graders + 2 LLM trace judges.
+# Requires a trace DAG to be attached to each case.
+suite = EvalSuite(plan="trace")
+```
+</CodeGroup>
+
+| Plan | Graders included | Requires LLM? |
+|---|---|---|
+| `"deterministic"` | `MaxToolCalls`, `RequiredTools`, `ForbiddenTools`, `ToolArgumentsMatch`, `ToolSequence`, `ToolOutputReferenced`, `Contains`, `NotContains`, `GroundTruthMatch`, `LatencyUnder`, `CostUnder` | No |
+| `"quality"` | All deterministic + `RubricJudge` | Yes |
+| `"agentic"` | All deterministic + `FaithfulnessJudge` | Yes |
+| `"trace"` | `BadToolFailureRecovery`, `UnnecessaryToolLoop`, `StaleContextUsage`, `InvalidStateTransition`, `RetrievalPrecisionRecall`, `StepCostAttribution`, `FailureOrigin`, `HallucinatedToolResultJudge`, `PlanningActionMismatchJudge` | Yes (last two) |
+
+<Note>
+  Every grader automatically **skips** when its corresponding `expected` field is absent from the case. A skipped grade does not affect the case status or pass rate — only evaluated grades count.
+</Note>
+
+## EvalResult fields
+
+`EvalSuite.run()` returns an `EvalResult` object with the following fields.
+
+<ResponseField name="total_cases" type="int">
+  Total number of cases in the dataset, regardless of whether any grader was active.
+</ResponseField>
+
+<ResponseField name="evaluated_cases" type="int">
+  Cases where at least one grader produced a PASSED or FAILED result (i.e., was not entirely skipped).
+</ResponseField>
+
+<ResponseField name="passed_cases" type="int">
+  Cases where every non-skipped grade passed.
+</ResponseField>
+
+<ResponseField name="failed_cases" type="int">
+  Cases where at least one non-skipped grade failed.
+</ResponseField>
+
+<ResponseField name="pass_rate" type="float">
+  `passed_cases / evaluated_cases`. Returns `0.0` when no cases were evaluated.
+</ResponseField>
+
+<ResponseField name="skipped_grades" type="int">
+  Total number of individual SKIPPED grade results across all cases and all graders.
+</ResponseField>
+
+<ResponseField name="case_results" type="list[CaseResult]">
+  Per-case breakdown. Each `CaseResult` has `case_id`, `status` (`"passed"`, `"failed"`, or `"not_evaluated"`), and `grades` — a list of `GradeResult` objects, one per grader.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict">
+  Suite-level metadata including `plan`, `grader_names`, and `created_at` timestamp.
+</ResponseField>
+
+## Explore further
+
+<CardGroup cols={3}>
+  <Card title="Datasets" icon="database" href="/evals/datasets">
+    How to structure JSON and JSONL dataset files and load them with `Dataset.from_path()`.
+  </Card>
+  <Card title="Graders" icon="check-circle" href="/evals/graders">
+    All 11+ built-in deterministic graders, custom `RegexGrader`, and code graders.
+  </Card>
+  <Card title="LLM Judges" icon="brain" href="/evals/llm-judges">
+    `RubricJudge`, `FaithfulnessJudge`, and trace-level LLM judges for qualitative evaluation.
+  </Card>
+</CardGroup>

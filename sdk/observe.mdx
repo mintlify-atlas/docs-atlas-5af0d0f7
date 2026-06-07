@@ -1,0 +1,133 @@
+---
+title: "northstar.observe() — Instrument a Child Span"
+sidebarTitle: "observe()"
+description: "Use @northstar.observe to wrap any function as a child span inside an active trace. Automatically captures function arguments as input and return value as output."
+---
+
+`northstar.observe()` is a **decorator factory** that wraps a function in a child span tied to the currently active trace. Every time the decorated function is called, NorthStar opens a span for it, captures the function's arguments as `tool_arguments` events and the return value as a `tool_result` event, then closes the span when the function returns. This is the primary way to add structured observability to helper functions, tool calls, retrieval steps, and any other sub-operations inside an agent run.
+
+## `observe` vs `trace`
+
+| | `northstar.trace()` | `northstar.observe()` |
+|---|---|---|
+| **Creates** | A new top-level Run | A child Span inside an existing Run |
+| **Usage** | Entry point of your agent | Sub-functions called within the agent |
+| **Without active trace** | Starts a fresh run | No-op — silently does nothing |
+| **Form** | Decorator **or** context manager | Decorator only |
+
+## Function signature
+
+```python
+def observe(
+    name: str | None = None,
+    *,
+    attributes: Mapping[str, Any] | None = None,
+) -> _ObserveFactory
+```
+
+## Parameters
+
+<ParamField body="name" type="str | None" default="None">
+  Display name for the child span. Shown in the trace waterfall on the dashboard. When omitted, the wrapped function's `__name__` is used automatically.
+</ParamField>
+
+<ParamField body="attributes" type="Mapping[str, Any] | None" default="None">
+  Arbitrary key-value metadata attached to the span's `attributes` dictionary. Use this to add static context that doesn't change between calls (e.g. `{"index": "docs-v2"}`). For dynamic per-call data, prefer `log_event()` or `log_metadata()` inside the function body.
+</ParamField>
+
+## Basic decorator example
+
+```python
+import northstar
+
+@northstar.observe("retrieve-docs")
+def retrieve_docs(query: str) -> list[str]:
+    northstar.log_event("retrieval_started", {"query": query})
+    return vector_db.search(query)
+```
+
+When `retrieve_docs("How does caching work?")` is called inside an active trace:
+
+1. A child span named `"retrieve-docs"` is opened.
+2. `{"query": "How does caching work?"}` is recorded as a `tool_arguments` event.
+3. The function body executes; `log_event` attaches a custom event to the span.
+4. The return value is recorded as a `tool_result` event.
+5. The span is closed with latency and status.
+
+## Composing with `@northstar.trace`
+
+```python
+@northstar.observe("retrieve-docs")
+def retrieve_docs(query: str) -> list[str]:
+    northstar.log_event("retrieval_started", {"query": query})
+    return vector_db.search(query)
+
+@northstar.observe("generate-answer")
+def generate_answer(query: str, docs: list[str]) -> str:
+    northstar.log_metric("retrieval_count", len(docs))
+    return llm.complete(query, context=docs)
+
+@northstar.trace("research-agent", tags=["rag"])
+def run_agent(query: str) -> str:
+    docs = retrieve_docs(query)
+    return generate_answer(query, docs)
+```
+
+This produces a single run with two child spans (`retrieve-docs` and `generate-answer`) visible in the trace waterfall.
+
+## Span nesting
+
+`@northstar.observe` spans nest automatically. If an observed function calls another observed function, the inner span becomes a child of the outer span — no configuration required. The parent-child relationship is tracked via Python's `ContextVar`.
+
+```python
+@northstar.observe("inner")
+def inner():
+    return "ok"
+
+@northstar.observe("outer")
+def outer():
+    return inner()  # inner span's parent_span_id == outer span's id
+
+@northstar.trace("agent")
+def run_agent():
+    return outer()
+```
+
+## Attaching static attributes
+
+```python
+@northstar.observe("vector-search", attributes={"index": "docs-v2", "top_k": 5})
+def vector_search(query: str) -> list[str]:
+    return index.query(query, top_k=5)
+```
+
+## Async support
+
+`@northstar.observe()` works transparently with `async def` functions. The span is started before the coroutine is awaited and closed after it resolves, correctly propagating the span context across `await` points.
+
+```python
+@northstar.observe("retrieve-docs")
+async def retrieve_docs(query: str) -> list[str]:
+    return await async_vector_db.search(query)
+
+@northstar.trace("async-agent")
+async def run_agent(query: str) -> str:
+    docs = await retrieve_docs(query)
+    return await generate_answer(query, docs)
+```
+
+## `observe()` vs `span()`
+
+| | `@northstar.observe()` | `northstar.span()` |
+|---|---|---|
+| **Form** | Decorator | Context manager (`with`) |
+| **Input capture** | Auto — from function arguments | Manual — call `log_event()` yourself |
+| **Output capture** | Auto — from return value | Manual |
+| **Best for** | Existing functions, tool wrappers | Inline code blocks |
+
+<Note>
+  If `@northstar.observe()` is called on a function that runs **outside** an
+  active trace, it is a complete no-op. The function executes normally and no
+  span is created. This means you can safely decorate shared utilities without
+  worrying about calls that happen at import time or in tests.
+</Note>

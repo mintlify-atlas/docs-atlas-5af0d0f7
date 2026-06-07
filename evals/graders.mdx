@@ -1,0 +1,281 @@
+---
+title: "Deterministic Graders for Agent Evaluation"
+sidebarTitle: "Graders"
+description: "NorthStar includes 11+ built-in deterministic graders covering tool calls, output content, latency, and cost. Each grader is skipped automatically when its expected field is absent."
+---
+
+Deterministic graders evaluate agent runs without calling an LLM. They compare concrete facts — which tools were called, in what order, with what arguments, what the response contained, how long the run took, and how much it cost — against the expected values you declare in each dataset case. Graders never guess: if the expected field they need is absent, they return `SKIPPED` rather than `FAILED`. This means you can incrementally add graders to a dataset without breaking existing cases that don't set the corresponding fields.
+
+## Built-in deterministic graders
+
+### Standard graders
+
+| Grader class | `name` field | What it checks | Required `expected` field |
+|---|---|---|---|
+| `MaxToolCalls` | `max_tool_calls` | Total tool call count is within the configured limit | `expected.max_tool_calls` |
+| `RequiredTools` | `required_tools` | Every listed tool appears in the run's tool calls | `expected.required_tools` |
+| `ForbiddenTools` | `forbidden_tools` | None of the listed tools appear in the run's tool calls | `expected.forbidden_tools` |
+| `ToolArgumentsMatch` | `tool_arguments_match` | Each expected tool was called with at least the declared argument subset | `expected.tool_arguments` |
+| `ToolSequence` | `tool_sequence` | Tool calls appear in exactly the declared order | `expected.tool_sequence` |
+| `ToolOutputReferenced` | `tool_output_referenced` | Final response overlaps sufficiently with tool output text (threshold: 0.35) | `expected.require_tool_output_reference` |
+| `Contains` | `contains` | All listed phrases appear in the final response (case-insensitive) | `expected.contains` |
+| `NotContains` | `not_contains` | None of the listed phrases appear in the final response | `expected.not_contains` |
+| `GroundTruthMatch` | `ground_truth_match` | Final response contains the ground truth string (normalized whitespace, case-insensitive) | `expected.ground_truth` |
+| `LatencyUnder` | `latency_under` | Run latency is within the configured limit | `expected.max_latency_ms` and `metrics.latency_ms` |
+| `CostUnder` | `cost_under` | Total cost is within the configured limit | `expected.max_cost_usd` and `metrics.cost_usd` |
+
+### Trace graders
+
+Trace graders inspect the NorthStar trace DAG attached to each case. They are all skipped when `run.trace` is `None`.
+
+| Grader class | `name` field | What it checks | Required `expected` field |
+|---|---|---|---|
+| `BadToolFailureRecovery` | `bad_tool_failure_recovery` | Every failed tool span is followed by a recovery event (assistant message, reasoning, or final response) | None (trace required) |
+| `UnnecessaryToolLoop` | `unnecessary_tool_loop` | No tool signature repeats beyond the configured threshold (default: 3) | `expected.trace.max_repeated_tool_calls` (optional) |
+| `StaleContextUsage` | `stale_context_usage` | No trace events carry `stale`, `stale_context`, or `used_stale_context` attributes | None (trace required) |
+| `InvalidStateTransition` | `invalid_state_transition` | All observed state transitions are present in the allowed list | `expected.trace.allowed_state_transitions` |
+| `RetrievalPrecisionRecall` | `retrieval_precision_recall` | Retrieved document IDs meet precision and recall thresholds | `expected.trace.relevant_retrieval_ids` + thresholds |
+| `StepCostAttribution` | `step_cost_attribution` | Per-span costs are present and no span exceeds `max_step_cost_usd` | `expected.trace.max_step_cost_usd` (optional) |
+| `FailureOrigin` | `failure_origin` | Identifies the earliest failing span or event in the trace | None (trace required; always fails when failure evidence exists) |
+
+<Note>
+  `FailureOrigin` is designed as a diagnostic grader. It always produces `FAILED` when there is failure evidence in the trace, allowing you to pinpoint the root cause.
+</Note>
+
+## Using a grader directly
+
+You can call any grader's `.grade(case, run)` method outside of an `EvalSuite`. This is useful for quick interactive checks or custom evaluation loops.
+
+```python
+from northstar.evals import Dataset, normalize_messages
+from northstar.evals.graders import ToolSequence
+
+dataset = Dataset.from_records([
+    {
+        "id": "case-001",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"function": {"name": "search_docs", "arguments": "{}"}},
+                    {"function": {"name": "summarize", "arguments": "{}"}},
+                ],
+            },
+            {"role": "assistant", "content": "Here is your summary."},
+        ],
+        "expected": {"tool_sequence": ["search_docs", "summarize"]},
+    }
+])
+
+case = dataset.cases[0]
+run = normalize_messages(case.messages, metrics=case.metrics, metadata=case.metadata)
+
+grader = ToolSequence()
+result = grader.grade(case, run)
+
+print(result.status)   # "passed"
+print(result.reason)   # "Tool calls matched the expected sequence."
+```
+
+## GradeResult fields
+
+Every grader returns a `GradeResult` with the following fields.
+
+<ResponseField name="name" type="str">
+  The grader's `name` identifier (e.g., `"tool_sequence"`, `"contains"`).
+</ResponseField>
+
+<ResponseField name="status" type="GradeStatus">
+  One of `"passed"`, `"failed"`, or `"skipped"`.
+</ResponseField>
+
+<ResponseField name="reason" type="str">
+  A short machine-readable explanation of why the grade passed, failed, or was skipped.
+</ResponseField>
+
+<ResponseField name="feedback" type="str | None">
+  Actionable human-readable feedback. Populated by LLM judges; `None` for deterministic graders.
+</ResponseField>
+
+<ResponseField name="score" type="float | None">
+  Numeric score, normalized to `[0, 1]`. `1.0` for passing deterministic grades, `0.0` for failures, or the normalized LLM judge score.
+</ResponseField>
+
+<ResponseField name="threshold" type="float | None">
+  The passing threshold used to determine pass/fail. For deterministic graders this is typically `1.0`.
+</ResponseField>
+
+<ResponseField name="label" type="str | None">
+  A string label for the grade outcome (e.g., `"pass"`, `"fail"`, or a custom label from a scoring config).
+</ResponseField>
+
+<ResponseField name="confidence" type="float | None">
+  Optional confidence score from `0` to `1`. Populated by LLM judges when they return a `confidence` field.
+</ResponseField>
+
+<ResponseField name="evidence" type="list[str]">
+  Snippets of evidence supporting the grade outcome. Populated by `ToolOutputReferenced` and LLM judges.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict">
+  Grader-specific structured data, such as `actual_sequence` vs. `expected_sequence`, `missing_tools`, or LLM judge metadata.
+</ResponseField>
+
+## Running an EvalSuite with specific graders
+
+Pass an explicit `graders` list to `EvalSuite` to run only the graders you want.
+
+```python
+from northstar.evals import Dataset, EvalSuite
+from northstar.evals.graders import Contains, RequiredTools, ToolSequence
+
+dataset = Dataset.from_path("dataset.json")
+
+suite = EvalSuite(graders=[ToolSequence(), RequiredTools(), Contains()])
+result = suite.run(dataset)
+
+print(f"Pass rate: {result.pass_rate:.0%}")
+for case_result in result.case_results:
+    for grade in case_result.grades:
+        print(f"  [{grade.status}] {grade.name}: {grade.reason}")
+```
+
+## grader_plan() function
+
+`grader_plan(name)` returns the standard list of graders for a named plan. Use it to start from a plan and extend it.
+
+```python
+from northstar.evals import EvalSuite, grader_plan
+from northstar.evals.graders import RegexGrader
+
+# Start from the deterministic plan and add a custom regex check
+graders = grader_plan("deterministic") + [
+    RegexGrader("phone_number_format", r"\+1-\d{3}-\d{3}-\d{4}")
+]
+
+suite = EvalSuite(graders=graders)
+```
+
+Valid plan names: `"deterministic"`, `"quality"`, `"agentic"`, `"trace"`.
+
+## Custom graders
+
+### RegexGrader
+
+`RegexGrader` matches a regular expression against the final response (or any other target field) without requiring an LLM.
+
+<ParamField path="name" type="str" required>
+  The grader name that appears in results.
+</ParamField>
+
+<ParamField path="pattern" type="str" required>
+  A Python regular expression pattern.
+</ParamField>
+
+<ParamField path="target" type="str" default="final_response">
+  The value to match against. Use `"final_response"` (or `"output"`) for the last assistant message, `"case.<field>"` for a case attribute, or `"run.<field>"` for a run attribute.
+</ParamField>
+
+<ParamField path="flags" type="list[str]">
+  Optional list of flag names: `"ignorecase"`, `"multiline"`, `"dotall"`.
+</ParamField>
+
+```python
+from northstar.evals import Dataset, EvalSuite
+from northstar.evals.graders import RegexGrader
+
+suite = EvalSuite(graders=[
+    # Check that the response mentions a duration in days
+    RegexGrader(
+        "duration_mentioned",
+        r"\d+\s+days",
+        flags=["ignorecase"],
+    ),
+    # Check that a phone number is present
+    RegexGrader(
+        "phone_format",
+        r"\+1-\d{3}-\d{3}-\d{4}",
+    ),
+])
+
+result = suite.run(Dataset.from_path("dataset.json"))
+```
+
+### PythonCodeGrader
+
+`PythonCodeGrader` runs a Python `validate()` function in a sandboxed subprocess. The function receives `output` (the final response string), `case` (the `EvalCase` as a dict), and `run` (the `EvalRun` as a dict).
+
+<ParamField path="name" type="str" required>
+  The grader name.
+</ParamField>
+
+<ParamField path="code" type="str" required>
+  Python source code as a string. Must define `validate(output, case, run)`.
+</ParamField>
+
+<ParamField path="timeout_ms" type="int" default="1000">
+  Execution timeout in milliseconds. Maximum: 5000.
+</ParamField>
+
+```python
+from northstar.evals.graders import PythonCodeGrader
+
+grader = PythonCodeGrader(
+    "word_count_check",
+    """
+def validate(output, case, run):
+    word_count = len(output.split())
+    if word_count < 10:
+        return {
+            "passed": False,
+            "reason": f"Response too short: {word_count} words.",
+            "feedback": "Write a more detailed response with at least 10 words.",
+            "score": word_count / 10,
+        }
+    return True
+""",
+)
+```
+
+The `validate()` function can return:
+- A **boolean** (`True` = pass, `False` = fail)
+- A **dict** with `passed` (bool), optional `reason`, `feedback`, `score`, and `metadata`
+
+### TypeScriptCodeGrader
+
+`TypeScriptCodeGrader` works identically to `PythonCodeGrader` but runs TypeScript via Node.js. The exported `validate` function must be named `validate`.
+
+<ParamField path="name" type="str" required>
+  The grader name.
+</ParamField>
+
+<ParamField path="code" type="str" required>
+  TypeScript source as a string. Must export `validate(output, evalCase, run)`.
+</ParamField>
+
+<ParamField path="timeout_ms" type="int" default="1000">
+  Execution timeout in milliseconds. Maximum: 5000.
+</ParamField>
+
+```python
+from northstar.evals.graders import TypeScriptCodeGrader
+
+grader = TypeScriptCodeGrader(
+    "json_output_check",
+    """
+export function validate(output: string, evalCase: any, run: any): boolean {
+    try {
+        JSON.parse(output);
+        return true;
+    } catch {
+        return false;
+    }
+}
+""",
+)
+```
+
+<Warning>
+  `TypeScriptCodeGrader` requires `node` and `typescript` to be available in your environment. The grader transpiles the TypeScript source and runs it in a sandboxed VM context.
+</Warning>

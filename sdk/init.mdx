@@ -1,0 +1,180 @@
+---
+title: "northstar.init() — SDK Initialization"
+sidebarTitle: "init()"
+description: "Initialize the NorthStar SDK with your API key, project ID, and configuration options. Must be called once at application startup before any tracing."
+---
+
+`northstar.init()` bootstraps the NorthStar SDK and starts the background flush worker that batches telemetry records and ships them to the ingest endpoint. It should be called once, early in your application startup — before any calls to `trace()`, `observe()`, `span()`, or the logging helpers. All parameters are keyword-only. Credentials can be supplied directly or resolved automatically from environment variables.
+
+## Function signature
+
+```python
+def init(
+    *,
+    api_key: str | None = None,
+    project_id: str | None = None,
+    endpoint: str | None = None,
+    project: str | None = None,
+    environment: str | None = None,
+    enabled: bool | None = None,
+    debug: bool | None = None,
+    capture_inputs: bool = True,
+    capture_outputs: bool = True,
+    redact_keys: Iterable[str] | None = None,
+    batch_size: int = 50,
+    flush_interval: float = 5.0,
+    max_queue_size: int = 1000,
+) -> None
+```
+
+## Parameters
+
+<ParamField body="api_key" type="str | None" default="None">
+  Your NorthStar API key (begins with `ns_`). Falls back to the `NORTHSTAR_API_KEY` environment variable when not provided. Required for data to be sent; without it the SDK runs in no-op mode.
+</ParamField>
+
+<ParamField body="project_id" type="str | None" default="None">
+  Your Supabase project reference (e.g. `abcdefghijklmnop`). Used to derive the ingest URL as `https://{project_id}.supabase.co/functions/v1/ingest-traces`. Falls back to `NORTHSTAR_PROJECT_ID`. Either `project_id` or a custom `endpoint` must be present for ingestion to be active.
+</ParamField>
+
+<ParamField body="endpoint" type="str | None" default="None">
+  Override the ingest URL entirely. Useful for self-hosted deployments. Falls back to `NORTHSTAR_ENDPOINT`. Takes precedence over the URL derived from `project_id`.
+</ParamField>
+
+<ParamField body="project" type="str | None" default="None">
+  A human-readable project name (e.g. `"Support Agent"`). Stored in every run's metadata and visible in the dashboard. Falls back to `NORTHSTAR_PROJECT`.
+</ParamField>
+
+<ParamField body="environment" type="str | None" default="None">
+  Deployment environment label (e.g. `"production"`, `"staging"`, `"dev"`). Stored in every run's metadata. Falls back to `NORTHSTAR_ENVIRONMENT`.
+</ParamField>
+
+<ParamField body="enabled" type="bool | None" default="None">
+  Master on/off switch. When `False`, all SDK calls become no-ops — no network requests, no background threads. Defaults to `True` (or the value of `NORTHSTAR_ENABLED`, which accepts `1/true/yes/on` and `0/false/no/off`).
+</ParamField>
+
+<ParamField body="debug" type="bool | None" default="None">
+  Print internal SDK warnings to `stderr` (prefixed with `[NorthStar]`). Useful when diagnosing dropped records or flush failures. Defaults to `False` (or `NORTHSTAR_DEBUG`).
+</ParamField>
+
+<ParamField body="capture_inputs" type="bool" default="True">
+  Whether to capture function arguments and user inputs as trace events globally. Can be overridden per-trace with `@northstar.trace(capture_input=False)`.
+</ParamField>
+
+<ParamField body="capture_outputs" type="bool" default="True">
+  Whether to capture return values and final responses as trace events globally. Can be overridden per-trace with `@northstar.trace(capture_output=False)`.
+</ParamField>
+
+<ParamField body="redact_keys" type="Iterable[str] | None" default="None">
+  Additional key names whose values should be replaced with `"[REDACTED]"` before any data is enqueued. The SDK always redacts `api_key`, `authorization`, `cookie`, `password`, `secret`, and `token` by default; keys passed here are merged with that built-in set. Matching is case-insensitive and recursive (works inside nested dicts, lists, Pydantic models, and dataclasses).
+</ParamField>
+
+<ParamField body="batch_size" type="int" default="50">
+  Number of queued records that triggers an early flush without waiting for `flush_interval`. Must be greater than zero; raises `ValueError` otherwise.
+</ParamField>
+
+<ParamField body="flush_interval" type="float" default="5.0">
+  Seconds between scheduled background flushes. The background worker wakes every `flush_interval` seconds to send whatever is queued. Must be greater than zero; raises `ValueError` otherwise.
+</ParamField>
+
+<ParamField body="max_queue_size" type="int" default="1000">
+  Maximum total number of pending records (sessions + runs + spans + events) held in memory. Records are silently dropped when the queue is full (a warning is printed if `debug=True`). Must be greater than zero; raises `ValueError` otherwise.
+</ParamField>
+
+## Environment variable reference
+
+| Parameter | Environment variable | Default |
+|---|---|---|
+| `api_key` | `NORTHSTAR_API_KEY` | none |
+| `project_id` | `NORTHSTAR_PROJECT_ID` | none |
+| `endpoint` | `NORTHSTAR_ENDPOINT` | derived from `project_id` |
+| `project` | `NORTHSTAR_PROJECT` | none |
+| `environment` | `NORTHSTAR_ENVIRONMENT` | none |
+| `enabled` | `NORTHSTAR_ENABLED` | `true` |
+| `debug` | `NORTHSTAR_DEBUG` | `false` |
+
+## Basic usage
+
+```python
+import os
+import northstar
+
+northstar.init(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    project="Support Agent",
+    environment="production",
+)
+```
+
+Or rely entirely on environment variables:
+
+```bash
+export NORTHSTAR_API_KEY="ns_..."
+export NORTHSTAR_PROJECT_ID="abcdefghijklmnop"
+export NORTHSTAR_PROJECT="Support Agent"
+export NORTHSTAR_ENVIRONMENT="production"
+```
+
+```python
+import northstar
+
+northstar.init()  # credentials resolved from environment
+```
+
+## Advanced configuration
+
+```python
+northstar.init(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    project="Research Agent",
+    environment="staging",
+    capture_inputs=True,
+    capture_outputs=True,
+    redact_keys=["ssn", "credit_card"],
+    batch_size=100,
+    flush_interval=10.0,
+    max_queue_size=2000,
+    debug=True,
+)
+```
+
+## `init_logger()` alias
+
+`northstar.init_logger()` is a convenience alias for `init()`. It accepts the same parameters with one small difference: `api_key` and `project` are **required** keyword arguments (not optional). Use it as a drop-in replacement if you prefer the name.
+
+```python
+northstar.init_logger(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project="Support Agent",
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    environment="production",
+)
+```
+
+## Re-initialization
+
+Calling `init()` a second time is safe. The SDK shuts down the previous state — flushing any pending records and closing the background worker — then starts fresh with the new configuration. All traces created after the second `init()` call share a new session.
+
+```python
+northstar.init(api_key="ns_prod_...", project_id="prod-ref", environment="production")
+# ... later in tests ...
+northstar.init(enabled=False)  # shut down cleanly, enter no-op mode
+```
+
+<Note>
+  Traces that are **already in flight** when `init()` is called finish on their
+  original state object and are flushed as part of the shutdown sequence, so no
+  data is lost mid-trace.
+</Note>
+
+## No-op mode
+
+When `enabled=False`, or when neither `api_key` nor `project_id`/`endpoint` is available, the SDK enters no-op mode. Every API call succeeds silently — decorators execute the wrapped function normally, context managers yield a stub handle, and `flush()` returns `True` immediately. This lets you import and call NorthStar unconditionally without affecting test environments.
+
+<Warning>
+  `batch_size`, `flush_interval`, and `max_queue_size` must all be greater than
+  zero. Passing a non-positive value raises `ValueError` immediately, before any
+  state change takes effect.
+</Warning>

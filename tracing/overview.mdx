@@ -1,0 +1,85 @@
+---
+title: "Tracing Architecture in NorthStar"
+sidebarTitle: "Overview"
+description: "Understand the Session, Run, Span, and Event hierarchy that NorthStar uses to capture every step of an AI agent run, including LLM calls and tool invocations."
+---
+
+NorthStar traces every step of an AI agent run by organizing captured data into a strict four-level hierarchy: Sessions, Runs, Spans, and Events. This structure makes it possible to correlate a user interaction across multiple agent steps, individual LLM calls, and every tool invocation — all without touching your application control flow. Data flows from your agent process through an in-memory queue and a background worker thread directly to a Supabase Edge Function, then into private Postgres tables, and is visualized on the NorthStar dashboard.
+
+## Data Model
+
+Every entity in NorthStar maps to a row in the backend. The table below shows what each entity represents and the fields it carries.
+
+| Entity | Description | Key fields |
+|--------|-------------|------------|
+| **Session** | Top-level user tracking session | `id`, `project_id`, `created_at`, `metadata` |
+| **Run** | Agent run or step inside a session | `id`, `session_id`, `name`, `status`, `error`, `metadata` |
+| **Span** | Child span inside a run (nestable) | `id`, `run_id`, `parent_span_id`, `kind`, `name`, `attributes` |
+| **Event** | Individual trace event | `id`, `run_id`, `span_id`, `type`, `content`, `attributes` |
+| **Score** | Eval score attached to a run | `run_id`, `name`, `value`, `data_type`, `source` |
+
+## Hierarchy
+
+The entities nest in a strict parent–child relationship:
+
+```
+Session
+└── Run  (one or more per Session)
+    └── Span  (nestable — a Span can contain child Spans)
+        └── Event  (leaf records: messages, tool calls, metrics, custom events)
+```
+
+**Session** is the outermost container. All traces recorded after a single `northstar.init()` call share the same session automatically until the process shuts down or `init()` is called again.
+
+**Run** represents one agent execution — a single call to your traced function or a manually opened `northstar.trace()` context. The run carries top-level metadata such as tags, environment, and aggregated cost and token totals computed from its child model spans.
+
+**Span** is a nestable unit of work inside a run. Spans carry a `kind` field drawn from the `SpanKind` enum (`AGENT`, `WORKFLOW`, `MODEL`, `TOOL`, `CUSTOM`). A model span is automatically created by `northstar.model_call()` and records token usage, USD cost, and latency. Tool spans record arguments and results.
+
+**Event** is the leaf node. Events carry a typed `content` payload: `USER_INPUT`, `SYSTEM_MESSAGE`, `ASSISTANT_MESSAGE`, `REASONING`, `TOOL_ARGUMENTS`, `TOOL_RESULT`, `FINAL_RESPONSE`, or `CUSTOM`.
+
+## Context Propagation
+
+NorthStar uses Python's `contextvars.ContextVar` to track the current trace and current span throughout your call stack without any explicit handle passing. When you open a `northstar.trace()`, it sets `_current_trace` on the context. Every subsequent call to `northstar.span()`, `northstar.log_event()`, or `northstar.log_metric()` reads that variable automatically. This means spans nest correctly whether you use decorators, context managers, or a mix of both — and it works correctly across threads and async tasks because each `asyncio` task inherits its own copy of the context.
+
+## Background Worker
+
+All SDK writes are non-blocking. Records are placed into an in-memory queue and a daemon background thread (named `northstar-flush`) drains that queue on a schedule. The thread wakes up when either:
+
+- The queue reaches the configured `batch_size` (default: `50` records), or
+- The `flush_interval` elapses (default: `5.0` seconds).
+
+HTTP transport uses `httpx` with bounded retries on status codes `408`, `429`, `500`, `502`, `503`, and `504` (up to 3 attempts). Call `northstar.flush()` to drain the queue synchronously before your process exits, or at the end of a short-lived script.
+
+## No-Op Behavior
+
+When the SDK is disabled (via `enabled=False` or `NORTHSTAR_ENABLED=false`) or when `api_key` / `project_id` are missing, every tracing call returns a no-op stub. Your application code continues normally — no exceptions are raised, no data is queued, and there is zero runtime cost. The same behavior applies when the backend is unreachable: the background worker silently drops failed batches after exhausting its retry budget.
+
+<Tip>
+Set `debug=True` in `northstar.init()` (or `NORTHSTAR_DEBUG=true`) to print SDK warnings to stderr, including flush counts, dropped records, and patching confirmations from auto-instrumentation.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card
+    title="Auto-Instrumentation"
+    icon="wand-magic-sparkles"
+    href="/tracing/auto-instrumentation"
+  >
+    Capture all OpenAI and Anthropic calls automatically with a single function call.
+  </Card>
+  <Card
+    title="Manual Tracing"
+    icon="pen-to-square"
+    href="/tracing/manual-tracing"
+  >
+    Use decorators and context managers to instrument custom agent logic.
+  </Card>
+  <Card
+    title="Sessions & Runs"
+    icon="layer-group"
+    href="/tracing/sessions-and-runs"
+  >
+    Use the low-level client to control sessions, runs, spans, and scores directly.
+  </Card>
+</CardGroup>

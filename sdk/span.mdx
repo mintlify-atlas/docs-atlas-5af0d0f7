@@ -1,0 +1,145 @@
+---
+title: "northstar.span() — Create a Child Span"
+sidebarTitle: "span()"
+description: "Open a child span inside an active trace using northstar.span(). Use SpanKind to categorize spans as tool calls, model calls, retrieval operations, or custom steps."
+---
+
+`northstar.span()` is a **context manager** that opens a child span inside the currently active trace, runs the code block inside the `with` statement, then closes the span when the block exits — recording latency, status, and any errors automatically. Use `span()` when you want to trace an inline code block rather than wrapping an existing function with `@northstar.observe()`. Spans can be freely nested; parent-child relationships are resolved automatically via Python `ContextVar`s so you never need to pass handles manually.
+
+## Function signature
+
+```python
+def span(
+    name: str,
+    *,
+    kind: SpanKind = SpanKind.CUSTOM,
+    iteration: int | None = None,
+    attributes: Mapping[str, Any] | None = None,
+) -> _SpanHandle | _NoopSpan
+```
+
+## Parameters
+
+<ParamField body="name" type="str" required>
+  Display name for the span shown in the trace waterfall on the dashboard. Required.
+</ParamField>
+
+<ParamField body="kind" type="SpanKind" default="SpanKind.CUSTOM">
+  Category of work this span represents. Used by the dashboard for grouping, filtering, and cost roll-ups. See the `SpanKind` table below.
+</ParamField>
+
+<ParamField body="iteration" type="int | None" default="None">
+  Optional integer label for loop iterations, retry attempts, or parallel branches. Shown alongside the span name in the dashboard to disambiguate repeated steps. For example, pass `iteration=attempt_number` when retrying a flaky tool call.
+</ParamField>
+
+<ParamField body="attributes" type="Mapping[str, Any] | None" default="None">
+  Arbitrary key-value metadata stored in the span's `attributes` dictionary. Values must be JSON-serialisable. Sensitive keys matching the redact list (e.g. `api_key`, `token`) are replaced with `"[REDACTED]"` automatically.
+</ParamField>
+
+## `SpanKind` values
+
+`SpanKind` is a `StrEnum` defined in `northstar.models`. Import it from the top-level `northstar` package.
+
+| Value | String | Meaning |
+|---|---|---|
+| `SpanKind.AGENT` | `"agent"` | A nested agent or sub-agent invocation |
+| `SpanKind.WORKFLOW` | `"workflow"` | A multi-step orchestration or pipeline stage |
+| `SpanKind.MODEL` | `"model"` | An LLM or model call (used internally by `model_call()`) |
+| `SpanKind.TOOL` | `"tool"` | An external tool call, API call, or function execution |
+| `SpanKind.CUSTOM` | `"custom"` | Any other instrumented step (default) |
+
+```python
+from northstar import SpanKind
+```
+
+## Basic usage
+
+```python
+import northstar
+from northstar import SpanKind
+
+with northstar.span("search-docs", kind=SpanKind.TOOL) as span:
+    docs = vector_db.search(query)
+    span.log_event("results_found", {"count": len(docs)})
+```
+
+## `_SpanHandle` methods
+
+Inside the `with` block the handle exposes:
+
+<ResponseField name="log_event(name, data)" type="method">
+  Attaches a named custom event to this span. `data` can be any JSON-serialisable value.
+
+  ```python
+  span.log_event("cache_hit", {"key": cache_key, "ttl_remaining": 42})
+  ```
+</ResponseField>
+
+<ResponseField name="id" type="UUID">
+  The UUID of the underlying `Span` record. Useful when you need to cross-reference a span with an external system.
+</ResponseField>
+
+## Nested spans
+
+Spans nest automatically. When `northstar.span()` is called inside another `with northstar.span(...)` block, the inner span's `parent_span_id` is set to the outer span's `id` with no extra code.
+
+```python
+@northstar.trace("research-agent")
+def run_agent(query: str) -> str:
+    with northstar.span("retrieval", kind=SpanKind.TOOL) as retrieval_span:
+        retrieval_span.log_event("query_sent", {"query": query})
+
+        with northstar.span("rerank", kind=SpanKind.CUSTOM) as rerank_span:
+            docs = rerank(vector_db.search(query))
+            rerank_span.log_event("reranked", {"count": len(docs)})
+
+    with northstar.span("generation", kind=SpanKind.MODEL):
+        return llm.complete(query, context=docs)
+```
+
+## Iteration parameter
+
+Pass `iteration` when repeating a span in a loop, so each attempt is distinguishable in the dashboard.
+
+```python
+for attempt in range(3):
+    with northstar.span("call-api", kind=SpanKind.TOOL, iteration=attempt) as span:
+        try:
+            result = external_api.call(payload)
+            break
+        except TimeoutError as exc:
+            span.log_event("timeout", {"attempt": attempt})
+```
+
+## Attaching span attributes
+
+```python
+with northstar.span(
+    "vector-search",
+    kind=SpanKind.TOOL,
+    attributes={"index": "docs-v2", "top_k": 10},
+) as span:
+    results = index.query(query, top_k=10)
+    span.log_event("results", {"count": len(results)})
+```
+
+## No-op behavior
+
+`northstar.span()` returns a `_NoopSpan` when:
+
+- There is no active trace (i.e., `northstar.trace()` was not called before this point), or
+- The SDK is in disabled/unconfigured mode.
+
+`_NoopSpan` is a valid context manager and its `log_event()` method silently discards data, so code inside the block continues to run normally.
+
+<Note>
+  For wrapping existing functions rather than inline blocks, prefer
+  `@northstar.observe()` — it captures function arguments and return values
+  automatically without manual `log_event()` calls.
+</Note>
+
+<Tip>
+  Use `SpanKind.MODEL` only via `northstar.model_call()`, which populates token
+  usage and USD cost attributes automatically. Creating a `MODEL`-kind span
+  manually via `span()` will not include those fields.
+</Tip>

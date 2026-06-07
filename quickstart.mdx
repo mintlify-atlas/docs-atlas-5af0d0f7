@@ -1,47 +1,226 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with NorthStar in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Install the NorthStar SDK, set your credentials, and trace your first AI agent run with automatic OpenAI or Anthropic instrumentation."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+NorthStar is designed to be operational in minutes. You install one package, set two environment variables, add two lines of initialization code, and every LLM call your agent makes is automatically captured — messages, token usage, USD cost, latency, and errors included. This guide walks you from a blank terminal to a fully traced agent run.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Install the SDK">
+    Install `northstar-ai` from PyPI. The `uv` package manager is recommended for speed, but `pip` works equally well.
+
+    <CodeGroup>
+      ```bash uv
+      uv add northstar-ai
+      ```
+
+      ```bash pip
+      pip install northstar-ai
+      ```
+    </CodeGroup>
+
+    <Tip>
+      If you want LLM cost tracking or LLM-based eval graders, install the optional extras alongside the base package:
+
+      ```bash
+      uv add 'northstar-ai[pricing]'   # token counting + USD cost via LiteLLM
+      uv add 'northstar-ai[evals]'     # LLM-judge graders via LiteLLM
+      ```
+    </Tip>
+  </Step>
+
+  <Step title="Set your environment variables">
+    NorthStar needs two credentials: an API key and your Supabase project reference. Set them as environment variables before starting your agent process.
 
     ```bash
-    npm install your-package
+    export NORTHSTAR_API_KEY="ns_..."
+    export NORTHSTAR_PROJECT_ID="<supabase-project-ref>"
     ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+    You can also place these in a `.env` file at your project root — NorthStar uses `python-dotenv` and will pick them up automatically.
 
-    ```bash
-    your-cli start
+    <Note>
+      Both `NORTHSTAR_API_KEY` and `NORTHSTAR_PROJECT_ID` are required for the SDK to send data. If either is missing, the SDK falls back to no-op mode and your agent continues normally.
+    </Note>
+  </Step>
+
+  <Step title="Initialize with auto-instrumentation">
+    Call `northstar.auto_instrument()` **before** creating your LLM client, then call `northstar.init()` with your credentials. Both calls must happen once at application startup.
+
+    ```python
+    import os
+
+    import anthropic
+    import northstar
+
+    northstar.auto_instrument()  # patches openai + anthropic before any client is created
+    northstar.init(
+        api_key=os.environ["NORTHSTAR_API_KEY"],
+        project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+        project="Support Agent",
+        environment="production",
+    )
+    ```
+
+    `auto_instrument()` patches the OpenAI chat/responses endpoints and Anthropic `messages.create`. It captures:
+
+    - Request messages, tools, and tool choice
+    - Model-emitted tool calls and tool result messages included in later requests
+    - Output messages and token usage
+    - USD cost (when the `pricing` extra is installed)
+    - Latency and exceptions
+  </Step>
+
+  <Step title="Run a traced agent">
+    With auto-instrumentation active you can run your agent as normal — every LLM call is captured automatically. Use the `@northstar.trace` decorator to wrap your top-level agent function and the `@northstar.observe` decorator to create child spans around any sub-step.
+
+    **Auto-instrumented Anthropic example:**
+
+    ```python
+    import os
+
+    import anthropic
+    import northstar
+
+    northstar.auto_instrument()
+    northstar.init(
+        api_key=os.environ["NORTHSTAR_API_KEY"],
+        project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+        project="Support Agent",
+        environment="production",
+    )
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    response = client.messages.create(
+        model="claude-sonnet-4-5-20250929",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "How do I reset my password?"}],
+    )
+    northstar.flush()
+    ```
+
+    **Manual tracing with decorators:**
+
+    Use `@northstar.trace` to start a root run and `@northstar.observe` to nest child spans inside it. You can log events, metrics, and metadata anywhere inside the active trace.
+
+    ```python
+    import northstar
+
+    northstar.init(project="market-research-agent", environment="dev")
+
+
+    @northstar.observe("retrieve-docs")
+    def retrieve_docs(query: str) -> list[str]:
+        northstar.log_event("retrieval_started", {"query": query})
+        return ["NorthStar captures agent traces."]
+
+
+    @northstar.observe("generate-answer")
+    def generate_answer(query: str, docs: list[str]) -> str:
+        northstar.log_metric("retrieval_count", len(docs))
+        return f"{query}: {docs[0]}"
+
+
+    @northstar.trace("market-research-agent", tags=["example"])
+    def run_agent(query: str) -> str:
+        northstar.log_metadata({"source": "example"})
+        docs = retrieve_docs(query)
+        return generate_answer(query, docs)
+
+
+    print(run_agent("How does tracing work?"))
+    ```
+
+    **Context manager form with explicit input/output:**
+
+    ```python
+    with northstar.trace("research-agent", input={"query": query}) as trace:
+        with northstar.span("retrieval"):
+            docs = retrieve_docs(query)
+        trace.set_output(generate_answer(query, docs))
     ```
   </Step>
+
+  <Step title="Flush and view your traces">
+    The SDK batches records and sends them on a background thread. Call `northstar.flush()` at the end of a script (or test) to drain the queue synchronously before the process exits.
+
+    ```python
+    northstar.flush()          # drain with default timeout
+    northstar.flush(timeout=5) # drain with a 5-second deadline
+    ```
+
+    Once flushed, open your NorthStar dashboard to see the session, run, spans, and any events or metrics you logged.
+
+    <Tip>
+      Add `debug=True` to `northstar.init()` during development. The SDK will print `[NorthStar] ...` lines to stderr for every record created, every flush, and any warnings — making it easy to confirm everything is wired up correctly.
+
+      ```python
+      northstar.init(
+          api_key=os.environ["NORTHSTAR_API_KEY"],
+          project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+          debug=True,
+      )
+      ```
+    </Tip>
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Manual Model Call Recording
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+When you're not using auto-instrumentation, or when you want more control over what gets recorded, use the `northstar.model_call()` context manager inside an active trace to capture LLM input messages, output messages, and token usage manually.
+
+```python
+import northstar
+
+northstar.init(project="cost-tracking-demo", environment="dev")
+
+
+@northstar.trace("cost-tracked-agent", tags=["example", "pricing"])
+def run_agent(query: str) -> str:
+    messages = [
+        {"role": "system", "content": "You answer questions about tracing."},
+        {"role": "user", "content": query},
+    ]
+
+    with northstar.model_call("answer-llm", model="gpt-4o") as llm:
+        llm.record_input_messages(messages)
+        response_text = "NorthStar captures LLM cost in run metadata."
+        llm.record_output_message(
+            {"role": "assistant", "content": response_text},
+        )
+
+    return response_text
+
+
+print(run_agent("How does cost tracking work?"))
+northstar.flush(timeout=5)
+```
+
+`northstar.model_call()` opens a span of kind `MODEL` inside the active run. The `ModelSpan` object it yields exposes three methods:
+
+| Method | Purpose |
+|---|---|
+| `llm.record_input_messages(messages)` | Record the list of messages sent to the model |
+| `llm.record_output_message(message)` | Record the model's response message |
+| `llm.record_usage(prompt_tokens=..., completion_tokens=...)` | Record token counts (cost is computed automatically when `pricing` extra is installed) |
+
+## Log Correlation
+
+Call `northstar.current_trace_id()` anywhere inside an active `@northstar.trace` context to get the current run ID as a string. Attach it to your application log lines so you can jump from a log entry directly to the corresponding trace in the dashboard.
+
+```python
+import logging
+import northstar
+
+logger = logging.getLogger(__name__)
+
+@northstar.trace("my-agent")
+def run_agent(query: str) -> str:
+    trace_id = northstar.current_trace_id()
+    logger.info("agent started", extra={"trace_id": trace_id})
+    ...
+```

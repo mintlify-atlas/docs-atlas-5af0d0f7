@@ -1,0 +1,192 @@
+---
+title: "Configure the NorthStar SDK"
+sidebarTitle: "Configuration"
+description: "All northstar.init() parameters and environment variables. Control batching, capture behavior, sensitive field redaction, debug mode, and the ingest endpoint URL."
+---
+
+The NorthStar SDK is configured once at startup with a call to `northstar.init()`. Every parameter has a corresponding environment variable, and any argument you pass to `init()` takes precedence over its environment variable counterpart. The SDK will operate as a no-op — never raising exceptions or disrupting application control flow — if it is disabled or if the required credentials are missing.
+
+## Configuration reference
+
+| Argument | Environment variable | Default | Description |
+|---|---|---|---|
+| `api_key` | `NORTHSTAR_API_KEY` | none **(required)** | The NorthStar API key for your project, prefixed `ns_`. |
+| `project_id` | `NORTHSTAR_PROJECT_ID` | none **(required)** | The Supabase project reference (`~20 lowercase alphanumeric chars`). Used to derive the ingest URL automatically. |
+| `endpoint` | `NORTHSTAR_ENDPOINT` | derived from `project_id` | Full ingest URL override. Use this for self-hosted deployments instead of `project_id`. |
+| `project` | `NORTHSTAR_PROJECT` | none | Human-readable project name stamped on every run's metadata. |
+| `environment` | `NORTHSTAR_ENVIRONMENT` | none | Deployment environment label (e.g. `production`, `staging`). Stamped on every run's metadata. |
+| `enabled` | `NORTHSTAR_ENABLED` | `true` | Set to `false` to disable all SDK instrumentation without changing application code. |
+| `debug` | `NORTHSTAR_DEBUG` | `false` | When `true`, the SDK prints warnings and trace lifecycle messages to `stderr`. |
+| `capture_inputs` | — | `true` | Capture function arguments as trace inputs and span tool arguments globally. |
+| `capture_outputs` | — | `true` | Capture return values as trace outputs and span tool results globally. |
+| `redact_keys` | — | `api_key, authorization, cookie, password, secret, token` | Additional key names whose values are replaced with `"[REDACTED]"` before any data leaves the process. Merged with the default set. |
+| `batch_size` | — | `50` | Number of pending records that triggers an immediate background flush. |
+| `flush_interval` | — | `5.0` | Seconds between automatic background flushes when the batch size has not been reached. |
+| `max_queue_size` | — | `1000` | Maximum number of records the in-memory queue will hold. Records are dropped (with a debug warning) when the queue is full. |
+
+## Full init() example
+
+Call `northstar.init()` once, early in your application entry point, before any agent code runs.
+
+```python
+import northstar
+
+northstar.init(
+    api_key="ns_...",
+    project_id="<project-ref>",
+    project="My Agent",
+    environment="production",
+    debug=False,
+    capture_inputs=True,
+    capture_outputs=True,
+    redact_keys=["ssn", "credit_card"],
+    batch_size=50,
+    flush_interval=5.0,
+    max_queue_size=1000,
+)
+```
+
+Alternatively, export the required credentials as environment variables and call `init()` with no arguments:
+
+```bash
+export NORTHSTAR_API_KEY="ns_..."
+export NORTHSTAR_PROJECT_ID="<project-ref>"
+```
+
+```python
+import northstar
+
+northstar.init()  # reads from environment
+```
+
+## Endpoint override for self-hosted deployments
+
+By default, the ingest URL is derived from `project_id` as:
+
+```
+https://<project-id>.supabase.co/functions/v1/ingest-traces
+```
+
+If you are running NorthStar on your own Supabase project at a custom domain, or routing through a proxy, pass `endpoint` directly instead of `project_id`:
+
+```python
+northstar.init(
+    api_key="ns_...",
+    endpoint="https://my-custom-domain.example.com/functions/v1/ingest-traces",
+)
+```
+
+You can also set this via the `NORTHSTAR_ENDPOINT` environment variable.
+
+## Sensitive field redaction
+
+Before any trace data is enqueued, the SDK recursively walks every input, output, metadata, and attribute value and replaces the value of any key whose name matches a redacted key with the string `"[REDACTED]"`. Matching is **case-insensitive** and applies at every depth of nested dicts, lists, Pydantic models, and dataclasses.
+
+The default redacted keys are:
+
+```
+api_key  authorization  cookie  password  secret  token
+```
+
+To add project-specific fields, pass them to `redact_keys`. They are merged with the defaults — you cannot remove a default key without forking the SDK:
+
+```python
+northstar.init(
+    api_key="ns_...",
+    project_id="<project-ref>",
+    redact_keys=["ssn", "credit_card", "dob"],
+)
+```
+
+## Per-trace capture override
+
+Global `capture_inputs` and `capture_outputs` settings can be overridden on a per-trace basis using the `@northstar.trace()` decorator or context manager:
+
+```python
+# Disable input and output capture for a specific sensitive trace
+@northstar.trace("process-payment", capture_input=False, capture_output=False)
+def process_payment(card_number: str, amount: float) -> dict:
+    ...
+```
+
+```python
+# Context manager form
+with northstar.trace("process-payment", capture_input=False, capture_output=False):
+    result = process_payment(card_number, amount)
+```
+
+<Note>
+`capture_input` and `capture_output` are keyword arguments on `@northstar.trace()`, while the global init parameters are `capture_inputs` and `capture_outputs` (plural). Both spellings are intentional.
+</Note>
+
+## What is captured at each level
+
+**At the trace (run) level:**
+- Function arguments are captured as `user_input` when using `@northstar.trace()` as a decorator.
+- The return value is captured as a `final_response` event when `capture_output=True`.
+- Metadata, tags, project name, and environment are stamped on the run record.
+
+**At the span level** (via `@northstar.observe()` or `northstar.span()`):
+- Function arguments are captured as a `tool_arguments` event when `capture_inputs=True`.
+- The return value is captured as a `tool_result` event when `capture_outputs=True`.
+
+## Debug mode
+
+When `debug=True` (or `NORTHSTAR_DEBUG=true`), the SDK prints messages to `stderr` for key lifecycle events:
+
+- Trace and span creation with their UUIDs
+- Batch flush counts
+- Queue-full drop warnings
+- HTTP flush failures with the exception message
+
+```python
+northstar.init(api_key="ns_...", project_id="<project-ref>", debug=True)
+```
+
+All debug output is prefixed with `[NorthStar]` and written to `sys.stderr` so it does not interfere with `stdout`-based log pipelines.
+
+## Flushing and shutdown
+
+The SDK runs a daemon background worker thread that automatically flushes the queue on the `flush_interval` schedule. You can also flush manually or on shutdown.
+
+### northstar.flush()
+
+Drains the in-memory queue synchronously and sends a single HTTP batch to the ingest endpoint. Returns `True` on success, `False` if the flush failed.
+
+```python
+# Flush with the default HTTP timeout
+northstar.flush()
+
+# Flush with a custom timeout (in seconds)
+northstar.flush(timeout=30.0)
+```
+
+<Warning>
+`timeout` must be greater than zero. Passing `timeout=0` raises a `ValueError`.
+</Warning>
+
+### northstar.shutdown()
+
+Signals the background worker to stop, waits for it to exit (up to `flush_interval + 1` seconds), closes the active session, and performs a final synchronous flush. This is registered automatically via `atexit` so it runs when the Python process exits cleanly.
+
+```python
+# Explicit shutdown (useful in long-running services that reinitialize the SDK)
+northstar.flush()
+```
+
+<Tip>
+In serverless or short-lived processes, always call `northstar.flush()` at the end of your handler to ensure all queued records are sent before the process freezes or terminates.
+</Tip>
+
+## Boolean environment variable parsing
+
+Environment variables that represent booleans (`NORTHSTAR_ENABLED`, `NORTHSTAR_DEBUG`) accept the following values, all case-insensitive:
+
+| Truthy | Falsy |
+|---|---|
+| `1` | `0` |
+| `true` | `false` |
+| `yes` | `no` |
+| `on` | `off` |
+
+Any other value raises a `ValueError` at `init()` time.

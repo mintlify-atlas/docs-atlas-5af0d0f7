@@ -1,0 +1,113 @@
+---
+title: "NorthStar: AI Agent Observability Platform"
+sidebarTitle: "Introduction"
+description: "NorthStar provides traces, spans, LLM cost tracking, and evaluations for AI agents. Learn what it records, why it matters, and how the data flows."
+---
+
+NorthStar is an observability, debugging, and evaluation platform built specifically for AI agents. It records traces, child spans, events, metrics, errors, and LLM cost — all without changing your application's control flow. Whether you're running a simple question-answering bot or a complex multi-step research agent, NorthStar gives you the visibility you need to understand what your agent is doing, catch regressions early, and evaluate output quality over time.
+
+## Data Model
+
+NorthStar organizes all observability data into a four-level hierarchy. Each level is a context manager whose lifecycle is managed automatically, so your instrumentation code stays clean.
+
+| Entity | Description | Key Fields |
+|---|---|---|
+| **Session** | Top-level user tracking session | `id`, `project_id`, `created_at`, `metadata` |
+| **Run** | Agent run or step inside a session | `id`, `session_id`, `name`, `status`, `error`, `metadata` |
+| **Span** | Child span inside a run (nestable) | `id`, `run_id`, `parent_span_id`, `kind`, `name`, `attributes` |
+| **Event** | Individual trace event | `id`, `run_id`, `span_id`, `type`, `content`, `attributes` |
+| **Score** | Eval score attached to a run | `run_id`, `name`, `value`, `data_type`, `source` |
+
+A **Session** groups one or more **Runs** — for example, all steps in a single user conversation. Each **Run** represents a discrete agent execution and may contain many nested **Spans** (retrieval, tool calls, model calls, etc.). **Events** are attached to runs or spans and capture fine-grained moments: a retrieval starting, a tool erroring, or a custom metric being recorded. **Scores** are eval results written back to a run after grading.
+
+## Data Flow
+
+Every piece of data collected by the SDK follows the same path from your application to the dashboard:
+
+```
+Agent App (Python) ──► SDK ──► Supabase Edge Function ──► Postgres ──► Dashboard
+                          │            (Deno/TS)            (RLS)
+                          └─► local queue + background worker
+```
+
+Records are buffered in an in-process queue and sent by a background daemon thread. The thread wakes either when the batch size is reached or the flush interval elapses. Transport uses `httpx` with bounded retries on transient HTTP errors (`408 / 429 / 500 / 502 / 503 / 504`). The Supabase Edge Function validates every payload, authenticates the request against a SHA-256-hashed API key, stamps the `project_id` on every record, and calls `private.ingest_batch()` in Postgres. All tables are protected by Row Level Security for multi-tenant isolation.
+
+## Architecture
+
+The full component map for the SDK and backend looks like this:
+
+```
+Agent App (Python)
+    │
+    ▼
+SDK (src/northstar/)
+  ├── api.py        — High-level API (trace, observe, span, log_*)
+  ├── client.py     — HTTP transport, queue, retry logic
+  ├── models.py     — Pydantic models (Session, Run, Span, Event, Score)
+  ├── prompts.py    — Versioned prompt templates + bind() to model calls
+  ├── replay.py     — Replay recorded runs against a tool registry
+  ├── llm.py        — LLMService (LiteLLM wrapper with native tracing)
+  ├── pricing.py    — Token counting + USD cost via litellm
+  ├── evals/        — Dataset loaders + deterministic and LLM graders
+  └── instrumentation/
+       ├── openai.py     — Chat + Responses API patching
+       └── anthropic.py  — messages.create patching
+    │
+    ▼  POST / (Bearer auth)
+    │
+Supabase Edge Function (supabase/functions/ingest-traces/)
+  ├── Validates payload (UUIDs, enums, timestamps)
+  ├── Authenticates via SHA-256 hash lookup
+  ├── Stamps project_id on every record
+  ├── Topologically sorts spans
+    │
+    ▼  CALL private.ingest_batch()
+    │
+Postgres (migrations/)
+  ├── private.sessions, private.runs
+  ├── private.spans, private.events
+  ├── private.api_keys, private.scores
+  ├── Row Level Security (multi-tenant isolation)
+  └── ON CONFLICT (id) DO UPDATE (idempotent ingestion)
+```
+
+## Key Capabilities
+
+<CardGroup cols={2}>
+  <Card title="Auto-Instrumentation" icon="wand-magic-sparkles">
+    A single `northstar.auto_instrument()` call patches OpenAI and Anthropic clients to capture messages, tool calls, token usage, USD cost, latency, and exceptions — no per-call code changes needed.
+  </Card>
+  <Card title="Distributed Tracing" icon="diagram-project">
+    `@northstar.trace` and `@northstar.observe` decorators (plus context manager forms) let you nest spans arbitrarily deep. `ContextVar` propagation ensures correct parent-child linking across async and threaded code.
+  </Card>
+  <Card title="Versioned Prompts" icon="file-lines">
+    Store prompt templates server-side with `northstar.pull_prompt()`, compile them with Jinja or Python-style variables, and bind compiled versions directly to model call spans for full prompt lineage.
+  </Card>
+  <Card title="Evaluations" icon="chart-bar">
+    `northstar.evals` provides dataset loaders, deterministic graders (`output`, `tool_sequence`, `retrieval`, `regex`, `python_code`, and more), and LLM-judge rubrics for systematic agent evaluation.
+  </Card>
+  <Card title="LLM Cost Tracking" icon="circle-dollar-to-slot">
+    Install the `pricing` extra to get per-call token counting and USD cost via LiteLLM pricing tables. Cost is recorded on every `model_call` span and surfaced in run metadata.
+  </Card>
+  <Card title="Dashboard" icon="gauge">
+    A Next.js web dashboard visualises sessions, runs, spans, events, and eval scores. Project-scoped provider keys let dashboard rubric evals call OpenAI, Anthropic, or OpenRouter without exposing credentials client-side.
+  </Card>
+</CardGroup>
+
+## No-Op Fallback
+
+NorthStar is designed to never crash your application. When the SDK is disabled (via `NORTHSTAR_ENABLED=false`), when credentials are missing, or when the ingest endpoint is unreachable, all tracing calls silently become no-ops. Your agent continues to run normally. Enable `debug=True` (or set `NORTHSTAR_DEBUG=true`) to print SDK warnings to stderr so you can confirm the SDK is active during development.
+
+```python
+northstar.init(
+    api_key="ns_...",
+    project_id="<project-ref>",
+    debug=True,  # prints "[NorthStar] ..." warnings to stderr
+)
+```
+
+You can also call `northstar.current_trace_id()` at any point to retrieve the active run ID and correlate your application logs with NorthStar traces.
+
+<Card title="Get started in 5 minutes →" icon="rocket" href="/quickstart">
+  Install the SDK, set your credentials, and trace your first agent run.
+</Card>

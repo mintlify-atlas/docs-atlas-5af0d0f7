@@ -1,0 +1,248 @@
+---
+title: "Manual Tracing with Decorators and Context Managers"
+sidebarTitle: "Manual Tracing"
+description: "Use @northstar.trace, @northstar.observe, northstar.span(), and northstar.model_call() to manually instrument any Python function or code block."
+---
+
+Auto-instrumentation handles the LLM API boundary automatically, but most agents contain custom logic — routing, retrieval, business rules, multi-step orchestration — that lives outside any SDK call. Manual tracing lets you annotate that logic precisely: wrap a function with a decorator to capture its inputs and outputs as a span, or open a context manager to record only the code block you care about. Manual traces compose naturally with auto-instrumentation; model spans created by `auto_instrument()` are nested inside whatever trace or span is active in the current context.
+
+## Decorator API
+
+### `@northstar.trace` — Top-Level Trace
+
+`northstar.trace()` opens a **Run** and sets it as the current trace context. Use it on the entry-point function of an agent or workflow. Function arguments are captured as the run's input, and the return value is captured as the run's output.
+
+```python
+@northstar.trace(
+    name,          # str | None  — defaults to the function name
+    *,
+    input,         # Any        — explicit input value (overrides captured arguments)
+    metadata,      # dict | None
+    tags,          # Iterable[str] | None
+    capture_input, # bool | None — overrides the global capture_inputs setting
+    capture_output,# bool | None — overrides the global capture_outputs setting
+)
+```
+
+### `@northstar.observe` — Child Span
+
+`northstar.observe()` opens a **Span** inside the current trace. It records the function's arguments as `TOOL_ARGUMENTS` events and its return value as a `TOOL_RESULT` event, subject to the global `capture_inputs` / `capture_outputs` settings.
+
+```python
+@northstar.observe(
+    name,       # str | None  — defaults to the function name
+    *,
+    attributes, # dict | None — extra key/value attributes stored on the span
+)
+```
+
+### Combined Example
+
+This pattern is taken directly from the `examples/agent_run.py` file and the README:
+
+```python
+import northstar
+
+northstar.init(project="research-agent", environment="dev")
+
+
+@northstar.observe("retrieve-docs")
+def retrieve_docs(query: str) -> list[str]:
+    northstar.log_event("retrieval_started", {"query": query})
+    return ["NorthStar captures agent traces."]
+
+
+@northstar.observe("generate-answer")
+def generate_answer(query: str, docs: list[str]) -> str:
+    northstar.log_metric("retrieval_count", len(docs))
+    return f"{query}: {docs[0]}"
+
+
+@northstar.trace("market-research-agent", tags=["example"])
+def run_agent(query: str) -> str:
+    northstar.log_metadata({"source": "example"})
+    docs = retrieve_docs(query)
+    return generate_answer(query, docs)
+
+
+print(run_agent("How does tracing work?"))
+northstar.flush(timeout=5)
+```
+
+<Note>
+Both `@northstar.trace` and `@northstar.observe` support **sync and async** functions transparently. The decorator inspects the function with `inspect.iscoroutinefunction()` and wraps it accordingly — no changes to your function signature are needed.
+</Note>
+
+## Context Manager API
+
+### `with northstar.trace(...)` — Explicit Input/Output Control
+
+When you need to control exactly what is recorded as the trace input and output — for example, when the input is not the function's arguments — use the context manager form. The returned handle exposes `set_output()` for recording the result.
+
+```python
+with northstar.trace("research-agent", input={"query": query}) as trace:
+    with northstar.span("retrieval"):
+        docs = retrieve_docs(query)
+    trace.set_output(generate_answer(query, docs))
+```
+
+### `with northstar.span(...)` — Nested Spans
+
+`northstar.span()` opens a child **Span** inside the current trace context. Spans can be nested arbitrarily; each call reads `_current_span` from the context variable and uses it as the parent.
+
+```python
+northstar.span(
+    name,       # str       — required
+    *,
+    kind,       # SpanKind  — default SpanKind.CUSTOM
+    iteration,  # int | None
+    attributes, # dict | None
+)
+```
+
+**`SpanKind` values** (from `northstar.models.SpanKind`):
+
+| Value | String | Use for |
+|-------|--------|---------|
+| `SpanKind.AGENT` | `"agent"` | A sub-agent or nested agent call |
+| `SpanKind.WORKFLOW` | `"workflow"` | A multi-step workflow or pipeline stage |
+| `SpanKind.MODEL` | `"model"` | An LLM API call (used internally by `model_call`) |
+| `SpanKind.TOOL` | `"tool"` | A tool or function called by the agent |
+| `SpanKind.CUSTOM` | `"custom"` | Any other instrumented block |
+
+Full nested example with explicit span kinds:
+
+```python
+from northstar import SpanKind
+import northstar
+
+with northstar.trace("research-agent", input={"query": query}) as trace:
+    with northstar.span("retrieval", kind=SpanKind.TOOL):
+        docs = retrieve_docs(query)
+    with northstar.span("answer-generation", kind=SpanKind.WORKFLOW):
+        answer = generate_answer(query, docs)
+    trace.set_output(answer)
+```
+
+## `model_call` Context Manager
+
+Use `northstar.model_call()` when you want to record token usage, cost, and messages for an LLM call that is **not** covered by auto-instrumentation (for example, a custom HTTP call or a provider not yet patched). It opens a span of kind `MODEL` and returns a `ModelSpan` handle.
+
+```python
+northstar.model_call(
+    name,   # str — span name, e.g. "answer-llm"
+    *,
+    model,  # str — model identifier passed to litellm for pricing
+    run,    # Run | None — attach to a specific run instead of the current trace
+)
+```
+
+The `ModelSpan` handle exposes three recording methods:
+
+<ParamField body="record_input_messages" type="method">
+  Records the list of input messages and estimates input token count via litellm.
+
+  ```python
+  llm.record_input_messages(messages)
+  ```
+</ParamField>
+
+<ParamField body="record_output_message" type="method">
+  Records the assistant's output message and estimates output token count. If input tokens were already recorded, USD cost is computed automatically.
+
+  ```python
+  llm.record_output_message({"role": "assistant", "content": response_text})
+  ```
+</ParamField>
+
+<ParamField body="record_usage" type="method">
+  Records exact token counts and triggers cost computation when you have authoritative usage numbers from the API response.
+
+  ```python
+  llm.record_usage(
+      prompt_tokens=...,
+      completion_tokens=...,
+  )
+  ```
+</ParamField>
+
+**Full example** (from `examples/cost_tracking.py`):
+
+```python
+import northstar
+
+northstar.init(project="cost-tracking-demo", environment="dev")
+
+
+@northstar.observe("retrieve-docs")
+def retrieve_docs(query: str) -> list[str]:
+    return [f"Doc about {query}"]
+
+
+@northstar.trace("cost-tracked-agent", tags=["example", "pricing"])
+def run_agent(query: str) -> str:
+    messages = [
+        {"role": "system", "content": "You answer questions about tracing."},
+        {"role": "user", "content": query},
+    ]
+
+    with northstar.model_call("answer-llm", model="gpt-4o") as llm:
+        llm.record_input_messages(messages)
+        response_text = "NorthStar captures LLM cost in run metadata."
+        llm.record_output_message(
+            {"role": "assistant", "content": response_text},
+        )
+
+    docs = retrieve_docs(query)
+    return f"{response_text} (sources: {len(docs)})"
+
+
+print(run_agent("How does cost tracking work?"))
+northstar.flush(timeout=5)
+```
+
+## Logging Within Traces
+
+Three utility functions are available inside any active trace or span context:
+
+<ParamField body="northstar.log_event(name, data=None)" type="function">
+  Records a named custom event attached to the current span (or the current run if no span is active).
+
+  ```python
+  northstar.log_event("retrieval_started", {"query": query})
+  ```
+</ParamField>
+
+<ParamField body="northstar.log_metric(name, value)" type="function">
+  Records a named numeric metric. `value` must be a real number (not a boolean).
+
+  ```python
+  northstar.log_metric("retrieval_count", len(docs))
+  ```
+</ParamField>
+
+<ParamField body="northstar.log_metadata(metadata)" type="function">
+  Merges a dictionary of key/value pairs into the current span's attributes, or into the current run's metadata if no span is active.
+
+  ```python
+  northstar.log_metadata({"source": "example", "version": "2"})
+  ```
+</ParamField>
+
+## Correlating Application Logs
+
+Call `northstar.current_trace_id()` anywhere inside an active trace to get the run's UUID as a string. Use it to tag your application log lines so they can be joined with the NorthStar trace in the dashboard.
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+
+@northstar.trace("support-agent")
+def handle_request(user_id: str, message: str) -> str:
+    trace_id = northstar.current_trace_id()
+    logger.info("Handling request", extra={"trace_id": trace_id, "user_id": user_id})
+    # ... agent logic ...
+```
+
+`current_trace_id()` returns `None` when called outside of an active trace, so it is safe to call unconditionally.

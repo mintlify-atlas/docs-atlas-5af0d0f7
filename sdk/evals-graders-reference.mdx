@@ -1,0 +1,577 @@
+---
+title: "Graders and EvalSuite Reference"
+sidebarTitle: "Graders Reference"
+description: "Complete reference for EvalSuite, all built-in Grader classes, grader_plan(), GradeResult fields, and the Grader protocol for custom graders."
+---
+
+NorthStar's eval system is built around three concepts: a **Dataset** of `EvalCase` records, a list of **Graders** that score each case, and an **EvalSuite** that orchestrates the run and aggregates results. Graders are plain Python objects with a `grade(case, run)` method — they are deterministic functions, regex checks, code runners, or LLM-backed judges. You compose them freely, or pick a pre-built `grader_plan()` bundle.
+
+```python
+from northstar.evals import EvalSuite, Dataset
+from northstar.evals.graders import (
+    RubricJudge,
+    FaithfulnessJudge,
+    ToolSequence,
+    RegexGrader,
+    PythonCodeGrader,
+    TypeScriptCodeGrader,
+    grader_plan,
+    default_graders,
+    trace_graders,
+)
+```
+
+---
+
+## EvalSuite
+
+`EvalSuite` is the top-level orchestrator. It iterates over a `Dataset`, reconstructs an `EvalRun` from each case's messages and trace, applies every grader, and returns an `EvalResult`.
+
+```python
+suite = EvalSuite(plan="quality")
+result = suite.run(dataset)
+print(f"Pass rate: {result.pass_rate:.1%} ({result.passed_cases}/{result.evaluated_cases})")
+```
+
+### Constructor
+
+```python
+EvalSuite(graders=None, *, plan="deterministic", metadata={})
+```
+
+<ParamField path="graders" type="list[Grader] | None">
+  Explicit list of grader instances to use. When provided, `plan` is ignored. When `None`, the `plan` argument is used to select a pre-built grader list via `grader_plan(plan)`. Defaults to `None`.
+</ParamField>
+
+<ParamField path="plan" type="str">
+  Name of the pre-built grader bundle to use when `graders` is `None`. One of `"deterministic"`, `"quality"`, `"agentic"`, or `"trace"`. Defaults to `"deterministic"`.
+</ParamField>
+
+<ParamField path="metadata" type="dict[str, Any]">
+  Arbitrary metadata merged into the `EvalResult.metadata` dict. Useful for tagging runs with experiment names or model versions. Defaults to `{}`.
+</ParamField>
+
+### `run(dataset) -> EvalResult`
+
+Iterates over every `EvalCase` in `dataset`, applies all graders, and returns an aggregated `EvalResult`.
+
+<ParamField path="dataset" type="Dataset | Iterable[EvalCase]" required>
+  Any iterable of `EvalCase` objects, including a `Dataset` instance.
+</ParamField>
+
+**Returns:** `EvalResult`
+
+---
+
+## EvalResult
+
+`EvalResult` is returned by `EvalSuite.run()` and contains aggregate statistics and per-case breakdowns.
+
+<ResponseField name="total_cases" type="int">
+  Total number of cases in the dataset.
+</ResponseField>
+
+<ResponseField name="evaluated_cases" type="int">
+  Number of cases where at least one grader produced a non-skipped grade.
+</ResponseField>
+
+<ResponseField name="not_evaluated_cases" type="int">
+  Number of cases where every grader skipped (i.e., all required `expected` fields were absent).
+</ResponseField>
+
+<ResponseField name="passed_cases" type="int">
+  Number of evaluated cases where all non-skipped grades passed.
+</ResponseField>
+
+<ResponseField name="failed_cases" type="int">
+  Number of evaluated cases where at least one non-skipped grade failed.
+</ResponseField>
+
+<ResponseField name="pass_rate" type="float">
+  `passed_cases / evaluated_cases`. `0.0` when `evaluated_cases == 0`.
+</ResponseField>
+
+<ResponseField name="skipped_grades" type="int">
+  Total count of individual `SKIPPED` grade results across all cases and all graders.
+</ResponseField>
+
+<ResponseField name="case_results" type="list[CaseResult]">
+  Per-case breakdown. Each `CaseResult` contains the `case_id`, an overall `CaseStatus`, and the list of individual `GradeResult` objects from each grader.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict[str, Any]">
+  Merged from `EvalSuite.metadata`. Also includes `plan`, `grader_names`, and `created_at` automatically.
+</ResponseField>
+
+---
+
+## CaseResult
+
+<ResponseField name="case_id" type="str">
+  The `id` of the `EvalCase` that produced this result.
+</ResponseField>
+
+<ResponseField name="status" type="CaseStatus">
+  Overall pass/fail/not-evaluated for this case. See `CaseStatus` enum below.
+</ResponseField>
+
+<ResponseField name="grades" type="list[GradeResult]">
+  One `GradeResult` per grader, in the same order as `EvalSuite.graders`.
+</ResponseField>
+
+---
+
+## GradeResult
+
+Every grader returns a `GradeResult`. All fields except `name`, `status`, and `reason` are optional.
+
+<ResponseField name="name" type="str">
+  The grader's `name` attribute (e.g. `"required_tools"`, `"rubric_judge"`).
+</ResponseField>
+
+<ResponseField name="status" type="GradeStatus">
+  `PASSED`, `FAILED`, or `SKIPPED`. See `GradeStatus` enum below.
+</ResponseField>
+
+<ResponseField name="reason" type="str">
+  A concise machine-generated explanation of why the grade passed, failed, or was skipped. Always non-empty.
+</ResponseField>
+
+<ResponseField name="feedback" type="str | None">
+  Actionable feedback for the agent author. Populated by LLM judges with a concrete suggestion for what to fix. `None` for deterministic graders.
+</ResponseField>
+
+<ResponseField name="score" type="float | None">
+  Numeric score in `[0.0, 1.0]`. Deterministic graders use `1.0` for pass, `0.0` for fail. LLM judges normalize their raw score to this range.
+</ResponseField>
+
+<ResponseField name="threshold" type="float | None">
+  The passing threshold for this grade, typically `1.0` for deterministic graders and the normalized `passing_score` for judges.
+</ResponseField>
+
+<ResponseField name="label" type="str | None">
+  A short categorical label such as `"pass"`, `"fail"`, or a custom label defined in `JudgeScoringConfig.labels`.
+</ResponseField>
+
+<ResponseField name="confidence" type="float | None">
+  Optional confidence score in `[0.0, 1.0]` returned by LLM judges. `None` for deterministic graders.
+</ResponseField>
+
+<ResponseField name="evidence" type="list[str]">
+  Short strings copied or summarized from the inputs that justify the grade. Populated by LLM judges and some deterministic graders (e.g. `ToolOutputReferenced`). Defaults to `[]`.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict[str, Any]">
+  Grader-specific structured data. For deterministic graders, this carries counts and lists (e.g. `missing_tools`, `actual_sequence`). For LLM judges, this includes `judge_model`, `scoring_mode`, `raw_score`, and `scale`. Defaults to `{}`.
+</ResponseField>
+
+---
+
+## Enums
+
+### GradeStatus
+
+| Value | String | Meaning |
+|---|---|---|
+| `GradeStatus.PASSED` | `"passed"` | The grade criterion was met |
+| `GradeStatus.FAILED` | `"failed"` | The grade criterion was not met |
+| `GradeStatus.SKIPPED` | `"skipped"` | The required `expected` field was absent; grader did not run |
+
+### CaseStatus
+
+| Value | String | Meaning |
+|---|---|---|
+| `CaseStatus.PASSED` | `"passed"` | All non-skipped grades passed |
+| `CaseStatus.FAILED` | `"failed"` | At least one non-skipped grade failed |
+| `CaseStatus.NOT_EVALUATED` | `"not_evaluated"` | Every grader skipped (no `expected` fields were present) |
+
+---
+
+## `grader_plan(name)`
+
+Returns a pre-built list of graders by plan name. The default judge model is `openrouter/deepseek/deepseek-v4-flash`.
+
+```python
+from northstar.evals.graders import grader_plan
+
+graders = grader_plan("quality", judge_model="openai/gpt-4o")
+suite = EvalSuite(graders=graders)
+```
+
+<ParamField path="name" type="str" required>
+  One of the four plan names below. Raises `ValueError` for any other value.
+</ParamField>
+
+<ParamField path="judge_model" type="str">
+  Override the LLM judge model for plans that include judge graders. Defaults to `"openrouter/deepseek/deepseek-v4-flash"`.
+</ParamField>
+
+<ParamField path="completion_fn" type="Callable | None">
+  Optional custom completion function passed to all judge graders in the plan. When provided, the judges call `completion_fn(**kwargs)` instead of `litellm.completion`. Useful for testing and custom providers.
+</ParamField>
+
+### Plans
+
+| Plan | Includes | Best for |
+|---|---|---|
+| `"deterministic"` | All graders from `default_graders()` — tool checks, contains, ground truth, latency, cost | Fast, no LLM cost, CI pipelines |
+| `"quality"` | All deterministic graders + `RubricJudge` | Response quality evaluation with rubric scoring |
+| `"agentic"` | All deterministic graders + `FaithfulnessJudge` | RAG and tool-heavy agents where factual grounding matters |
+| `"trace"` | All graders from `trace_graders()` — loop detection, cost attribution, hallucination, planning | Deep trace-level analysis; requires a trace payload in each case |
+
+---
+
+## Built-in graders
+
+### Deterministic graders
+
+These graders never call an LLM. They are always included in `default_graders()`.
+
+| Class | `name` | Required `expected` field | Description |
+|---|---|---|---|
+| `MaxToolCalls` | `max_tool_calls` | `max_tool_calls` | Passes if the total tool call count ≤ limit |
+| `RequiredTools` | `required_tools` | `required_tools` | Passes if all named tools appear in `run.tool_calls` |
+| `ForbiddenTools` | `forbidden_tools` | `forbidden_tools` | Passes if no forbidden tool appears in `run.tool_calls` |
+| `ToolArgumentsMatch` | `tool_arguments_match` | `tool_arguments` | Passes if each named tool was called with arguments that are a superset of the expected dict |
+| `ToolSequence` | `tool_sequence` | `tool_sequence` | Passes if `run.tool_calls` names match the expected ordered list exactly |
+| `ToolOutputReferenced` | `tool_output_referenced` | `require_tool_output_reference` | Passes if the final response overlaps meaningfully with a tool output (threshold: 35%) |
+| `Contains` | `contains` | `contains` | Passes if every phrase appears (case-insensitive) in the final response |
+| `NotContains` | `not_contains` | `not_contains` | Passes if no forbidden phrase appears in the final response |
+| `GroundTruthMatch` | `ground_truth_match` | `ground_truth` | Passes if normalized `ground_truth` is a substring of normalized final response |
+| `LatencyUnder` | `latency_under` | `max_latency_ms` + `case.metrics.latency_ms` | Passes if `metrics.latency_ms` ≤ limit |
+| `CostUnder` | `cost_under` | `max_cost_usd` + `case.metrics.cost_usd` | Passes if `metrics.cost_usd` ≤ limit |
+
+### Configurable deterministic graders
+
+These require a constructor call.
+
+<Expandable title="RegexGrader">
+
+Matches a regular expression against a field in the case or run.
+
+```python
+RegexGrader(
+    name="phone_number_present",
+    pattern=r"\+?\d[\d\s\-]{7,}\d",
+    target="final_response",
+    flags=["ignorecase"],
+)
+```
+
+<ParamField path="name" type="str" required>
+  Display name for this grader instance.
+</ParamField>
+
+<ParamField path="pattern" type="str" required>
+  A Python `re` pattern string.
+</ParamField>
+
+<ParamField path="target" type="str">
+  The field to match against. `"final_response"` (alias `"output"`) targets `run.final_response`. Dotted paths like `"case.expected.ground_truth"` or `"run.final_response"` are also supported. Defaults to `"final_response"`.
+</ParamField>
+
+<ParamField path="flags" type="list[str] | None">
+  List of flag names. Supported: `"ignorecase"`, `"multiline"`, `"dotall"`. Defaults to `[]`.
+</ParamField>
+
+</Expandable>
+
+<Expandable title="PythonCodeGrader">
+
+Executes a Python snippet in a subprocess. The snippet must define a `validate(output, case, run)` function that returns `True`, `False`, or a dict `{"passed": bool, "reason": str, "feedback": str, "score": float}`.
+
+```python
+PythonCodeGrader(
+    name="json_parseable",
+    code="""
+def validate(output, case, run):
+    import json
+    try:
+        json.loads(output)
+        return True
+    except Exception:
+        return False
+""",
+    timeout_ms=1000,
+)
+```
+
+<ParamField path="name" type="str" required>
+  Display name for this grader instance.
+</ParamField>
+
+<ParamField path="code" type="str" required>
+  Python source code defining a `validate(output, case, run)` function. Run inside a `uv run python` subprocess.
+</ParamField>
+
+<ParamField path="timeout_ms" type="int">
+  Subprocess timeout in milliseconds. Must be between 1 and 5000. Defaults to `1000`.
+</ParamField>
+
+</Expandable>
+
+<Expandable title="TypeScriptCodeGrader">
+
+Executes a TypeScript snippet via Node.js. The snippet must export a `validate(output, evalCase, run)` function with the same return conventions as `PythonCodeGrader`.
+
+```python
+TypeScriptCodeGrader(
+    name="starts_with_hello",
+    code="""
+export function validate(output: string | null): boolean {
+    return typeof output === "string" && output.startsWith("Hello");
+}
+""",
+    timeout_ms=2000,
+)
+```
+
+<ParamField path="name" type="str" required>
+  Display name for this grader instance.
+</ParamField>
+
+<ParamField path="code" type="str" required>
+  TypeScript source code exporting a `validate` function. Transpiled with the TypeScript package and run in a Node.js VM context.
+</ParamField>
+
+<ParamField path="timeout_ms" type="int">
+  Subprocess timeout in milliseconds. Must be between 1 and 5000. Defaults to `1000`.
+</ParamField>
+
+</Expandable>
+
+### LLM judge graders
+
+These graders call an LLM and require an API key for the configured provider.
+
+<Expandable title="RubricJudge">
+
+Scores the final response against a goal and/or rubric using an LLM judge. The judge returns a numeric or binary score with a reason and actionable feedback.
+
+```python
+RubricJudge(
+    name="response_quality",
+    model="openai/gpt-4o",
+    rubric="The response must cite at least one source and include a direct answer in the first sentence.",
+    threshold=0.7,
+    temperature=0.0,
+)
+```
+
+<ParamField path="name" type="str" required>
+  Display name for this grader instance.
+</ParamField>
+
+<ParamField path="model" type="str">
+  LiteLLM model string for the judge. Defaults to `"openrouter/deepseek/deepseek-v4-flash"`.
+</ParamField>
+
+<ParamField path="rubric" type="str | None">
+  A rubric string that overrides `case.expected.rubric` and `case.expected.goal` inside the judge prompt. When `None`, the grader reads from `case.expected.goal` or `case.expected.rubric`.
+</ParamField>
+
+<ParamField path="completion_fn" type="Callable | None">
+  Custom completion function. When provided, called instead of `litellm.completion`. Useful for testing.
+</ParamField>
+
+<ParamField path="threshold" type="float">
+  Normalized passing score in `[0.0, 1.0]`. A case passes when the judge's normalized score meets or exceeds this threshold. Defaults to `0.5`.
+</ParamField>
+
+<ParamField path="temperature" type="float">
+  Judge LLM temperature. Defaults to `0.0` for deterministic output.
+</ParamField>
+
+<ParamField path="scoring" type="JudgeScoringConfig | None">
+  Advanced scoring configuration. When provided, overrides `threshold`. Use `JudgeScoringConfig(mode="binary")` for simple pass/fail, or `mode="numeric"` with custom `min_score`, `max_score`, and `passing_score`.
+</ParamField>
+
+Skips when neither `case.expected.goal`, `case.expected.rubric`, nor `self.rubric` is provided.
+
+</Expandable>
+
+<Expandable title="FaithfulnessJudge">
+
+A `RubricJudge` subclass specialized for faithfulness evaluation. Checks whether the final response is grounded in the provided `context` and tool outputs. Penalizes unsupported claims even when they sound plausible.
+
+```python
+FaithfulnessJudge(
+    name="faithfulness_judge",
+    model="openrouter/deepseek/deepseek-v4-flash",
+    threshold=0.7,
+)
+```
+
+<ParamField path="name" type="str">
+  Display name. Defaults to `"faithfulness_judge"`.
+</ParamField>
+
+<ParamField path="model" type="str">
+  LiteLLM model string. Defaults to `"openrouter/deepseek/deepseek-v4-flash"`.
+</ParamField>
+
+<ParamField path="completion_fn" type="Callable | None">
+  Custom completion function for testing.
+</ParamField>
+
+<ParamField path="threshold" type="float">
+  Normalized passing score. Defaults to `0.7` (stricter than `RubricJudge`).
+</ParamField>
+
+<ParamField path="temperature" type="float">
+  Judge LLM temperature. Defaults to `0.0`.
+</ParamField>
+
+<ParamField path="scoring" type="JudgeScoringConfig | None">
+  Advanced scoring configuration. Overrides `threshold` when provided.
+</ParamField>
+
+Skips when neither `case.expected.context` nor `run.tool_outputs` is present.
+
+</Expandable>
+
+### Trace graders
+
+These graders require a trace DAG to be present in the case. They are included in `trace_graders()` and the `"trace"` plan.
+
+| Class | `name` | Required input | Description |
+|---|---|---|---|
+| `BadToolFailureRecovery` | `bad_tool_failure_recovery` | Trace with failed tool spans | Passes if every failed tool span is followed by a recovery event (reasoning, assistant message, or final response) |
+| `UnnecessaryToolLoop` | `unnecessary_tool_loop` | Trace with repeated tool calls | Passes if no tool signature repeats more than `max_repeated_tool_calls` times |
+| `StaleContextUsage` | `stale_context_usage` | Trace with `stale`-marked events | Passes if no events have stale context markers in their attributes |
+| `InvalidStateTransition` | `invalid_state_transition` | Trace + `expected.trace.allowed_state_transitions` | Passes if all observed state transitions are in the allowed set |
+| `RetrievalPrecisionRecall` | `retrieval_precision_recall` | Trace + `expected.trace.relevant_retrieval_ids` | Computes precision and recall against the expected relevant document IDs |
+| `StepCostAttribution` | `step_cost_attribution` | Trace with `cost_usd` attributes on spans | Reports per-step cost; fails if any step exceeds `expected.trace.max_step_cost_usd` |
+| `FailureOrigin` | `failure_origin` | Trace with errored spans or run error | Identifies the earliest failure-origin span or event in the trace |
+| `HallucinatedToolResultJudge` | `hallucinated_tool_result_judge` | Trace + LLM | LLM judge: passes only if final response claims are supported by observed `tool_result` events |
+| `PlanningActionMismatchJudge` | `planning_action_mismatch_judge` | Trace + LLM | LLM judge: passes only if later tool calls are consistent with stated reasoning/planning events |
+
+<Expandable title="HallucinatedToolResultJudge constructor">
+
+```python
+HallucinatedToolResultJudge(
+    name="hallucinated_tool_result_judge",
+    model="openrouter/deepseek/deepseek-v4-flash",
+    threshold=0.7,
+    temperature=0.0,
+    completion_fn=None,
+    scoring=None,
+)
+```
+
+Inherits all parameters from `RubricJudge`. Skips when no trace DAG is present.
+
+</Expandable>
+
+<Expandable title="PlanningActionMismatchJudge constructor">
+
+```python
+PlanningActionMismatchJudge(
+    name="planning_action_mismatch_judge",
+    model="openrouter/deepseek/deepseek-v4-flash",
+    threshold=0.7,
+    temperature=0.0,
+    completion_fn=None,
+    scoring=None,
+)
+```
+
+Inherits all parameters from `RubricJudge`. Skips when no trace DAG is present.
+
+</Expandable>
+
+---
+
+## Helper functions
+
+### `default_graders() -> list[Grader]`
+
+Returns a fresh instance list of all 11 deterministic graders: `MaxToolCalls`, `RequiredTools`, `ForbiddenTools`, `ToolArgumentsMatch`, `ToolSequence`, `ToolOutputReferenced`, `Contains`, `NotContains`, `GroundTruthMatch`, `LatencyUnder`, `CostUnder`.
+
+### `trace_graders(*, completion_fn=None, judge_model=DEFAULT_RUBRIC_JUDGE_MODEL) -> list[Grader]`
+
+Returns a fresh instance list of all 9 trace-aware graders: `BadToolFailureRecovery`, `UnnecessaryToolLoop`, `StaleContextUsage`, `InvalidStateTransition`, `RetrievalPrecisionRecall`, `StepCostAttribution`, `FailureOrigin`, `HallucinatedToolResultJudge`, `PlanningActionMismatchJudge`.
+
+---
+
+## Custom grader protocol
+
+Any Python class that implements the `Grader` protocol can be passed to `EvalSuite`. The protocol requires:
+
+```python
+class MyGrader:
+    name = "my_grader"          # str class attribute
+    requires_feedback = False   # bool class attribute; True for LLM judges
+
+    def grade(self, case: EvalCase, run: EvalRun) -> GradeResult:
+        # Use case.expected, run.final_response, run.tool_calls, etc.
+        if run.final_response is None:
+            return GradeResult(
+                name=self.name,
+                status=GradeStatus.SKIPPED,
+                reason="Final response was not found.",
+            )
+        passed = "magic word" in run.final_response.lower()
+        return GradeResult(
+            name=self.name,
+            status=GradeStatus.PASSED if passed else GradeStatus.FAILED,
+            reason="Found magic word." if passed else "Magic word was missing.",
+            score=1.0 if passed else 0.0,
+        )
+```
+
+Pass your custom grader alongside built-ins:
+
+```python
+suite = EvalSuite(graders=[
+    *default_graders(),
+    MyGrader(),
+    RubricJudge("response_quality"),
+])
+result = suite.run(dataset)
+```
+
+<Tip>
+  Return `GradeStatus.SKIPPED` when the required `expected` field is absent. This keeps the case status as `NOT_EVALUATED` rather than forcing a failure, and avoids inflating the pass or fail counts with incomplete data.
+</Tip>
+
+---
+
+## Complete example
+
+```python
+from northstar.evals import EvalSuite, Dataset
+from northstar.evals.graders import RubricJudge, RequiredTools, Contains, grader_plan
+
+# Load dataset
+dataset = Dataset.from_path("evals/weather_agent.jsonl")
+
+# Custom grader mix
+suite = EvalSuite(
+    graders=[
+        RequiredTools(),
+        Contains(),
+        RubricJudge(
+            name="response_quality",
+            model="openai/gpt-4o-mini",
+            threshold=0.7,
+        ),
+    ],
+    metadata={"experiment": "v2-weather-agent", "model": "gpt-4o-mini"},
+)
+
+result = suite.run(dataset)
+
+print(f"Total cases:     {result.total_cases}")
+print(f"Evaluated:       {result.evaluated_cases}")
+print(f"Passed:          {result.passed_cases}")
+print(f"Pass rate:       {result.pass_rate:.1%}")
+print(f"Skipped grades:  {result.skipped_grades}")
+
+for case_result in result.case_results:
+    print(f"\nCase {case_result.case_id}: {case_result.status}")
+    for grade in case_result.grades:
+        print(f"  {grade.name}: {grade.status} — {grade.reason}")
+        if grade.feedback:
+            print(f"    Feedback: {grade.feedback}")
+```

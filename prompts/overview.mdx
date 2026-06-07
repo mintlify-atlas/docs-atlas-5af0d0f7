@@ -1,0 +1,129 @@
+---
+title: "Versioned Prompt Management in NorthStar"
+sidebarTitle: "Overview"
+description: "NorthStar stores prompt templates server-side with full version history. Pull, compile, and bind prompts to model call spans to track which prompt version produced each trace."
+---
+
+Prompt management in NorthStar connects every model call back to the exact prompt template that produced it. Instead of hardcoding prompt strings inside your agent code, you store templates server-side in the NorthStar dashboard, pull them at runtime by name and label, compile them with your variables, and pass the compiled content to your LLM. Because the SDK automatically records a prompt link on the surrounding model call span, every trace in your dashboard carries a precise reference to the prompt version, variable values, and content hash that drove it — giving you full reproducibility and the ability to correlate prompt changes with changes in agent behaviour.
+
+## Key objects
+
+NorthStar's prompt system is built around three Pydantic models that flow in sequence: the server-side version record, the compiled result, and the top-level prompt descriptor.
+
+<ResponseField name="Prompt" type="object">
+  The top-level prompt descriptor returned when listing prompts. Contains the
+  prompt's `id`, `project_id`, `name`, `slug`, optional `description`, the
+  `current_version_id`, and a `labels` dict mapping label names (e.g.
+  `"production"`) to the version UUID they point to.
+</ResponseField>
+
+<ResponseField name="PromptVersion" type="object">
+  An immutable snapshot of a prompt at a specific point in time. Carries the
+  template `content`, optional `model`, `temperature`, and `max_tokens` hints,
+  an auto-extracted `variables` schema, a `content_hash`, and metadata such as
+  `version_number`, `parent_version_id`, and `change_note`. See
+  [Versioning](/prompts/versioning) for full field documentation.
+</ResponseField>
+
+<ResponseField name="CompiledPrompt" type="object">
+  The result of rendering a `PromptVersion` with concrete variable values.
+  Contains the final rendered `content`, the original `raw_content` (the
+  unrendered template), the `variables` dict, model hints, and the
+  `content_hash` inherited from the version. Passed directly to
+  `llm.record_input_messages()` or used as a string in message payloads.
+</ResponseField>
+
+## Pull and compile workflow
+
+The standard pattern is a single `with northstar.pull_prompt(...)` block that fetches the prompt version, compiles it, and uses the result inside a model call:
+
+```python
+with northstar.pull_prompt("summarizer", label="production") as prompt:
+    compiled = prompt.compile(doc=doc_text, max_words=120)
+    with northstar.model_call("summarise", model="gpt-4o") as llm:
+        llm.record_input_messages([{"role": "user", "content": compiled}])
+```
+
+<Steps>
+  <Step title="pull_prompt resolves the version">
+    `northstar.pull_prompt("summarizer", label="production")` posts to the
+    NorthStar resolve endpoint and returns a `CompiledPrompt` pre-loaded with
+    the `PromptVersion` identified by the `"production"` label. The context
+    manager keeps the object alive for the duration of the block.
+  </Step>
+  <Step title="compile renders the template">
+    `prompt.compile(doc=doc_text, max_words=120)` calls `render_template` on
+    the version's content, substituting every `{{ variable }}` and `{variable}`
+    placeholder. Missing variables raise a `ValueError` immediately — nothing is
+    silently dropped.
+  </Step>
+  <Step title="model_call span is opened">
+    `northstar.model_call("summarise", model="gpt-4o")` opens a child span of
+    kind `MODEL` inside the active trace.
+  </Step>
+  <Step title="Prompt is automatically bound to the span">
+    When the `pull_prompt` context manager exits, the SDK enqueues a
+    `prompt_link` record that associates the span's `trace_id` and `span_id`
+    with the `prompt_version_id` and the exact `variable_values` used — no
+    extra calls required.
+  </Step>
+</Steps>
+
+## Label-based version resolution
+
+Labels are named pointers stored alongside a prompt that map a human-readable
+name to a specific version UUID. When you call `pull_prompt` with a `label`
+argument, NorthStar resolves that label server-side and returns the version it
+currently points to.
+
+```python
+# Resolve whichever version is currently tagged "production"
+with northstar.pull_prompt("summarizer", label="production") as prompt:
+    ...
+
+# Resolve the "staging" label for pre-release testing
+with northstar.pull_prompt("summarizer", label="staging") as prompt:
+    ...
+```
+
+<Note>
+  Labels like `"production"` and `"staging"` are conventions, not reserved
+  keywords. You can create any label name in the dashboard and point it to any
+  version. Promoting a new version to `"production"` is a label update — the
+  old version is never deleted and can always be restored.
+</Note>
+
+## Automatic prompt-to-span binding
+
+When a compiled prompt is used inside a `model_call` block, NorthStar records
+two pieces of traceability data automatically:
+
+- **`prompt.compile.requested`** — written to the span's `attributes` dict at
+  compile time, containing the `prompt_version_id` and `content_hash`.
+- **Prompt link** — flushed with the trace payload, containing the `trace_id`,
+  `span_id`, `prompt_version_id`, and the `variable_values` dict used during
+  compilation.
+
+This means you can always look up a trace in the dashboard and see exactly
+which prompt version was active, what variables were injected, and whether the
+content has drifted (via `content_hash`) since the trace was recorded.
+
+<Tip>
+  You can also bind a compiled prompt to a span explicitly by calling
+  `prompt.bind(variables={...}, span=span)` as a context manager. This is
+  useful when the model call span is created separately from the
+  `pull_prompt` block. See [Templates](/prompts/templates) for details.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Versioning" icon="code-branch" href="/prompts/versioning">
+    Understand how versions are created, what each field means, and how labels
+    pin named pointers to specific versions.
+  </Card>
+  <Card title="Templates" icon="brackets-curly" href="/prompts/templates">
+    Learn the supported template syntax, the compile API, and how missing
+    variables are caught at compile time.
+  </Card>
+</CardGroup>

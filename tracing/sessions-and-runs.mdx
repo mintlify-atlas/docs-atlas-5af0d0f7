@@ -1,0 +1,186 @@
+---
+title: "Sessions, Runs, and the Low-Level Client"
+sidebarTitle: "Sessions & Runs"
+description: "Use the Northstar low-level client to manage sessions and runs directly, attach scores, and control capture options per run."
+---
+
+The high-level `northstar.init()` API is designed for the common case: one long-lived session per process, runs created automatically by `@northstar.trace`, and a shared background worker. The low-level `Northstar` client gives you direct control over every layer of the hierarchy. Use it when you need to manage session boundaries explicitly, attach evaluation scores to individual runs, customize which event types are captured, or integrate NorthStar into a framework that manages its own execution lifecycle.
+
+## Instantiating the Client
+
+```python
+from northstar import CaptureOptions, Northstar, SpanKind
+
+client = Northstar(
+    api_key="ns_...",
+    project_id="<supabase-project-ref>",
+    capture=CaptureOptions(
+        user_input=True,
+        final_response=True,
+    ),
+)
+```
+
+The `endpoint` parameter can be used instead of `project_id` for self-hosted deployments:
+
+```python
+client = Northstar(
+    api_key="ns_...",
+    endpoint="https://my-server.example.com/ingest",
+    capture=CaptureOptions(user_input=True, final_response=True),
+)
+```
+
+## CaptureOptions
+
+`CaptureOptions` controls which event types are actually written to the queue. All fields default to `False` when constructing the low-level client directly, giving you explicit opt-in control over what is stored.
+
+<ParamField body="user_input" type="bool" default="false">
+  Capture `USER_INPUT` events — the initial message or prompt provided to the agent.
+</ParamField>
+
+<ParamField body="system_messages" type="bool" default="false">
+  Capture `SYSTEM_MESSAGE` events from LLM request payloads.
+</ParamField>
+
+<ParamField body="assistant_messages" type="bool" default="false">
+  Capture `ASSISTANT_MESSAGE` events — intermediate assistant responses within a conversation.
+</ParamField>
+
+<ParamField body="reasoning" type="bool" default="false">
+  Capture `REASONING` events — model reasoning or chain-of-thought content when available.
+</ParamField>
+
+<ParamField body="tool_arguments" type="bool" default="false">
+  Capture `TOOL_ARGUMENTS` events — the input arguments passed to each tool call.
+</ParamField>
+
+<ParamField body="tool_results" type="bool" default="false">
+  Capture `TOOL_RESULT` events — the content returned by tool executions.
+</ParamField>
+
+<ParamField body="final_response" type="bool" default="false">
+  Capture `FINAL_RESPONSE` events — the terminal response delivered back to the user.
+</ParamField>
+
+When you use `northstar.init()`, all seven flags are set to `True` automatically.
+
+## Full Low-Level Example
+
+The following example demonstrates a complete run with user input, a tool span, a final response, and an attached evaluation score:
+
+```python
+from northstar import CaptureOptions, Northstar, SpanKind
+
+client = Northstar(
+    api_key="ns_...",
+    project_id="<project-ref>",
+    capture=CaptureOptions(user_input=True, final_response=True),
+)
+
+with client.session(metadata={"source": "cli"}) as session:
+    with session.run("research-agent") as run:
+        run.record_user_input("Find the current API documentation.")
+
+        with run.span("search-docs", kind=SpanKind.TOOL):
+            # ... your tool logic here ...
+            pass
+
+        run.record_final_response("Documentation found.")
+        client.score(run.id, "relevance", 0.92, source="human")
+```
+
+<Note>
+`Session`, `Run`, and `Span` are context managers. Their `__exit__` methods stamp `ended_at`, set the final `status` (`ok` or `error`), and enqueue the record for flushing. When the outermost `session` context exits, it calls `client.flush()` synchronously to drain the queue.
+</Note>
+
+## Attaching Scores
+
+`client.score()` attaches an evaluation score to any run. The score type is inferred from the Python type of `value`:
+
+```python
+client.score(
+    run.id,        # str | UUID — the run to attach the score to
+    "relevance",   # name
+    0.92,          # float → numeric score
+    source="human",
+)
+
+# Categorical score (string value)
+client.score(run.id, "quality", "good")
+
+# Boolean score
+client.score(run.id, "answered", True)
+```
+
+Scores can also be attached to a specific span by passing `span_id=span.id`.
+
+## Recording Run Events
+
+The `Run` object exposes typed recording methods that respect the `CaptureOptions` flags configured on the client:
+
+| Method | Event type written |
+|--------|--------------------|
+| `run.record_user_input(content)` | `USER_INPUT` |
+| `run.record_system_message(content)` | `SYSTEM_MESSAGE` |
+| `run.record_assistant_message(content)` | `ASSISTANT_MESSAGE` |
+| `run.record_final_response(content)` | `FINAL_RESPONSE` |
+| `run.record_tool_result(content)` | `TOOL_RESULT` |
+| `run.record_custom_event(content)` | `CUSTOM` |
+| `run.record_error(exc)` | sets `status=ERROR` and `error` field |
+
+## Session Lifecycle
+
+Under the high-level `northstar.init()` API, one session is created lazily the first time a `@northstar.trace` or `with northstar.trace(...)` block is opened. That session is reused for all subsequent traces in the same process. It is finalized (and its `ended_at` timestamp is set) when `northstar.shutdown()` is called — either explicitly or via the `atexit` hook registered by the SDK.
+
+Under the low-level client, you control session boundaries entirely via `with client.session(...) as session:`. Multiple sessions can be opened sequentially; each session gets its own UUID and metadata.
+
+## Trace Replay
+
+`run.replay(tools=...)` lets you re-execute a previously recorded run against a tool registry, replaying the exact tool call sequence deterministically:
+
+```python
+tool_registry = {
+    "search_docs": search_docs,
+    "fetch_url": fetch_url,
+}
+
+with session.run("research-agent") as run:
+    # ... run your agent ...
+    replay = run.replay(tools=tool_registry)
+```
+
+This is useful for regression testing: record a golden run once, then replay it against a new version of your tools to verify the outputs have not changed.
+
+## Lifecycle and Threading
+
+The low-level `Northstar` client does **not** start a background worker thread on its own. Flushing is triggered explicitly:
+
+- **`client.flush()`** — builds the current batch payload and POSTs it synchronously. Returns the payload dict. Clears all pending queues on success.
+- **`client.aflush()`** — async variant of `flush()` for use in `asyncio` contexts.
+
+The high-level `_SDKState` layer (used by `northstar.init()`) adds the background daemon thread. Its configuration parameters map directly to `northstar.init()` arguments:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `batch_size` | `50` | Flush when the pending record count reaches this threshold |
+| `flush_interval` | `5.0` | Maximum seconds between background flushes |
+| `max_queue_size` | `1000` | Records beyond this limit are dropped with a debug warning |
+
+The background thread is a daemon thread (`daemon=True`), so it does not prevent the Python interpreter from exiting. Call `northstar.flush()` explicitly at the end of short-lived scripts to ensure all queued data is sent before the process exits.
+
+## flush() and shutdown()
+
+```python
+# Drain the queue synchronously (returns True on success)
+northstar.flush()
+
+# Drain with a timeout (raises ValueError if timeout <= 0)
+northstar.flush(timeout=5.0)
+```
+
+`northstar.shutdown()` is registered as an `atexit` handler automatically. It stops the background worker, finalizes the current session, and performs a final flush. You do not need to call it manually in most applications.
+
+<Tip>
+In test suites, call `northstar.flush()` after each test case to ensure all spans from that test are sent before the next test starts — especially important when tests share a single `northstar.init()` call.
+</Tip>

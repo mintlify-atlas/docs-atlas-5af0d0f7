@@ -1,0 +1,141 @@
+---
+title: "Installing the NorthStar Python SDK"
+sidebarTitle: "Installation"
+description: "Install northstar-ai from PyPI using uv or pip. Optional extras add LiteLLM pricing support and eval graders. Requires Python 3.11 or later."
+---
+
+The NorthStar Python SDK is published on PyPI as `northstar-ai` and supports Python 3.11 and later. The base package is intentionally lightweight — its only runtime dependencies are `httpx`, `pydantic`, `python-dotenv`, and `requests`. Heavier optional features such as LLM cost tracking and LLM-based eval graders are opt-in extras that pull in `litellm` only when you need it.
+
+## Requirements
+
+- **Python** `>= 3.11`
+- **pip** or **uv** (uv recommended for faster installs and lockfile management)
+
+## Installing the Package
+
+<CodeGroup>
+  ```bash uv
+  uv add northstar-ai
+  ```
+
+  ```bash pip
+  pip install northstar-ai
+  ```
+</CodeGroup>
+
+## Optional Extras
+
+NorthStar ships two optional extras. Install whichever features your project requires by appending the extra name in brackets.
+
+<CodeGroup>
+  ```bash uv — pricing
+  uv add 'northstar-ai[pricing]'
+  ```
+
+  ```bash pip — pricing
+  pip install 'northstar-ai[pricing]'
+  ```
+</CodeGroup>
+
+<CodeGroup>
+  ```bash uv — evals
+  uv add 'northstar-ai[evals]'
+  ```
+
+  ```bash pip — evals
+  pip install 'northstar-ai[evals]'
+  ```
+</CodeGroup>
+
+You can install both extras together:
+
+```bash
+uv add 'northstar-ai[pricing,evals]'
+```
+
+### What each extra provides
+
+<CardGroup cols={2}>
+  <Card title="northstar-ai[pricing]" icon="circle-dollar-to-slot">
+    Pulls in `litellm >= 1.50.0`. Enables per-call token counting and USD cost calculation on every `model_call` span. Also required by `northstar.llm.LLMService`.
+  </Card>
+  <Card title="northstar-ai[evals]" icon="chart-bar">
+    Pulls in `litellm >= 1.50.0`. Enables LLM-judge graders in `northstar.evals` — including `rubric_judge` and `faithfulness` — that call a language model to score agent outputs.
+  </Card>
+</CardGroup>
+
+## Core Dependencies
+
+These packages are installed automatically with the base `northstar-ai` package. You do not need to install them separately.
+
+| Package | Version | Purpose |
+|---|---|---|
+| `httpx` | `>= 0.27.0` | HTTP transport for the ingest worker with retry logic |
+| `pydantic` | `>= 2.13.4` | Data models for Session, Run, Span, Event, and Score |
+| `python-dotenv` | `>= 1.2.2` | Automatic `.env` file loading for credentials |
+| `requests` | `>= 2.34.2` | HTTP client used by sync helper utilities |
+
+## Environment Variables
+
+NorthStar reads configuration from environment variables at `init()` time. Arguments passed directly to `northstar.init()` always take precedence over environment variables.
+
+| Variable | Description |
+|---|---|
+| `NORTHSTAR_API_KEY` | **Required.** Your project API key (starts with `ns_`). |
+| `NORTHSTAR_PROJECT_ID` | **Required.** Your Supabase project reference string. |
+| `NORTHSTAR_ENABLED` | `true` / `false`. Set to `false` to disable all SDK activity without removing instrumentation code. Default: `true`. |
+| `NORTHSTAR_DEBUG` | `true` / `false`. When enabled, the SDK prints `[NorthStar] ...` warnings to stderr for every flush and any errors. Default: `false`. |
+| `NORTHSTAR_PROJECT` | Optional label attached to every run's metadata (e.g. `"Support Agent"`). |
+| `NORTHSTAR_ENVIRONMENT` | Optional environment label attached to every run's metadata (e.g. `"production"`, `"staging"`). |
+
+<Note>
+  You can place `NORTHSTAR_API_KEY` and `NORTHSTAR_PROJECT_ID` in a `.env` file at your project root. NorthStar loads it automatically via `python-dotenv` — no extra setup required.
+</Note>
+
+## Local Development Setup
+
+To contribute to NorthStar or run the test suite locally, clone the repository and install all development dependencies with `uv`:
+
+```bash
+git clone <repo>
+cd northstar
+uv sync --group dev
+```
+
+The `dev` group installs `pytest`, `pytest-asyncio`, and `respx` (an HTTP mock library for testing `httpx`-based transports). Run the Python test suite with:
+
+```bash
+uv run pytest -q tests
+```
+
+To run the Deno tests for the Supabase Edge Function:
+
+```bash
+cd supabase/functions/ingest-traces && npx -y deno test --allow-env --allow-net index_test.ts
+```
+
+## Verifying Your Installation
+
+After installing, confirm the SDK initializes and can reach the ingest endpoint with this short snippet. If `debug=True` prints `[NorthStar] sent N records` after `flush()`, everything is wired up correctly.
+
+```python
+import northstar
+
+northstar.init(
+    api_key="ns_...",          # or rely on NORTHSTAR_API_KEY env var
+    project_id="<project-ref>", # or rely on NORTHSTAR_PROJECT_ID env var
+    debug=True,
+)
+
+@northstar.trace("smoke-test")
+def hello() -> str:
+    northstar.log_event("ping", {"status": "ok"})
+    return "NorthStar is working"
+
+print(hello())
+northstar.flush(timeout=5)
+```
+
+<Tip>
+  If you see `[NorthStar] disabled because NORTHSTAR_API_KEY and NORTHSTAR_PROJECT_ID are required` in stderr, your credentials are not being read. Double-check that your environment variables are exported in the current shell session or present in your `.env` file.
+</Tip>

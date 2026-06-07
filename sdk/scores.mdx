@@ -1,0 +1,173 @@
+---
+title: "Attaching Scores to Agent Runs"
+sidebarTitle: "Scores"
+description: "Use client.score() to attach numeric or string quality scores to any run. Scores track human feedback, eval results, and automated quality signals in the trace store."
+---
+
+Scores are quality signals you attach to a run after it completes. They let you correlate human feedback, automated eval results, and computed metrics directly with the trace data that produced them. Each score is stored in the trace database alongside the run's spans and events, and is immediately visible on the NorthStar dashboard. You can attach multiple scores per run — for example, one for relevance, one for faithfulness, and one for human thumbs-up feedback.
+
+---
+
+## Score model
+
+Every score submitted through `client.score()` is stored as a `Score` record with the following fields:
+
+<ResponseField name="trace_id" type="UUID" required>
+  The `id` of the `Run` this score is attached to. Passed as the first positional argument to `client.score()`.
+</ResponseField>
+
+<ResponseField name="span_id" type="UUID | None">
+  Optionally scope the score to a specific child `Span` within the run. When `None`, the score applies to the run as a whole. Pass via the `span_id=` keyword argument.
+</ResponseField>
+
+<ResponseField name="name" type="str" required>
+  A non-blank label identifying what this score measures. Examples: `"relevance"`, `"faithfulness"`, `"thumbs_up"`, `"cost_ok"`. Used as the display name in the dashboard.
+</ResponseField>
+
+<ResponseField name="value" type="float" required>
+  The numeric score value. For `boolean` scores, this is `1.0` (true) or `0.0` (false). For `categorical` scores, this is always `0.0` and the human-readable label is carried in `string_value`.
+</ResponseField>
+
+<ResponseField name="data_type" type='"numeric" | "categorical" | "boolean"'>
+  Inferred automatically from the Python type of the value you pass. You can also pass `data_type=` explicitly if needed. The three valid types are:
+  - **`"numeric"`** — a `float` or `int` on a continuous scale (e.g. `0.92`)
+  - **`"boolean"`** — a Python `bool`: `True` maps to `1.0`, `False` to `0.0`
+  - **`"categorical"`** — a Python `str` label (e.g. `"thumbs_up"`)
+</ResponseField>
+
+<ResponseField name="source" type='"api"'>
+  Always `"api"` for scores submitted through the Python SDK. This field is set automatically and cannot be overridden.
+</ResponseField>
+
+<ResponseField name="comment" type="str | None">
+  Optional free-text note, e.g. an annotator's rationale or a link to a review. Passed via the `comment=` keyword argument.
+</ResponseField>
+
+---
+
+## `client.score()`
+
+Enqueues a score to be flushed with the next batch. The score is sent to the backend on the next `client.flush()` call (or automatically by the background worker).
+
+```python
+client.score(
+    run.id,
+    name="relevance",
+    value=0.92,
+)
+```
+
+<ParamField path="trace_id" type="str | UUID" required>
+  The `id` of the `Run` to attach this score to. Accepts either a `UUID` object or a UUID string.
+</ParamField>
+
+<ParamField path="name" type="str" required>
+  A non-blank display label for this score. Raises `ValueError` if blank.
+</ParamField>
+
+<ParamField path="value" type="float | bool | str" required>
+  The score value. The Python type determines `data_type` automatically:
+  - `float` or `int` → `"numeric"`
+  - `bool` → `"boolean"` (`True` = `1.0`, `False` = `0.0`)
+  - `str` → `"categorical"` (stored as the `string_value`)
+</ParamField>
+
+<ParamField path="span_id" type="str | UUID | None">
+  Optional. Scope the score to a specific child span. When omitted, the score applies to the whole run.
+</ParamField>
+
+<ParamField path="data_type" type='"numeric" | "categorical" | "boolean" | None'>
+  Optional. If provided, must match the type inferred from `value`. Raises `ValueError` on mismatch. Omit this parameter in most cases — the SDK infers it correctly.
+</ParamField>
+
+<ParamField path="comment" type="str | None">
+  Optional free-text annotation. Displayed alongside the score in the dashboard.
+</ParamField>
+
+---
+
+## Examples
+
+### Numeric score from a human reviewer
+
+```python
+from northstar import Northstar, CaptureOptions, SpanKind
+
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+
+with client.session() as session:
+    with session.run("support-agent") as run:
+        run.record_user_input("How do I reset my password?")
+        # ... agent logic ...
+        run.record_final_response("Click 'Forgot password' on the login page.")
+
+    # Attach a score after the run completes, still inside the session
+    client.score(
+        run.id,
+        name="relevance",
+        value=0.95,
+        comment="Response directly addressed the user's question.",
+    )
+```
+
+### Boolean thumbs-up feedback
+
+```python
+client.score(run.id, name="thumbs_up", value=True)
+```
+
+### Categorical label from a human annotator
+
+```python
+client.score(run.id, name="quality_label", value="excellent")
+```
+
+### Scoping a score to a specific span
+
+```python
+with run.span("retrieve-docs", kind=SpanKind.TOOL) as span:
+    docs = vector_db.search(query)
+
+# Score the retrieval span specifically
+client.score(
+    run.id,
+    name="retrieval_precision",
+    value=0.88,
+    span_id=span.id,
+    comment="3 of 4 retrieved docs were relevant.",
+)
+```
+
+---
+
+## data_type rules
+
+| Python value | Inferred `data_type` | Notes |
+|---|---|---|
+| `0.92` (`float`) | `"numeric"` | Any finite float or int |
+| `True` / `False` (`bool`) | `"boolean"` | Stored as `1.0` / `0.0` |
+| `"thumbs_up"` (`str`) | `"categorical"` | Label stored in `string_value` |
+
+<Warning>
+  Boolean values must be Python `bool`, not `0` or `1`. Passing `data_type="boolean"` with a `float` value of `0.5` raises a `ValueError` because it is not `0.0` or `1.0`.
+</Warning>
+
+---
+
+## Scores from EvalSuite
+
+When you run an `EvalSuite`, each grader's `GradeResult` is also surfaced as a score on the corresponding run. This happens automatically — you don't need to call `client.score()` yourself for eval-generated scores.
+
+```python
+from northstar.evals import EvalSuite, Dataset
+
+suite = EvalSuite(plan="quality")
+result = suite.run(dataset)
+
+# pass_rate is also available as a score on each run in the dashboard
+print(f"Pass rate: {result.pass_rate:.1%}")
+```
+
+<Note>
+  Scores are stored with the trace and are visible in the NorthStar dashboard under the **Scores** tab of any run. They can be filtered, sorted, and used to build dashboards tracking quality over time.
+</Note>

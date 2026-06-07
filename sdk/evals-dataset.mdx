@@ -1,0 +1,308 @@
+---
+title: "Dataset — Load and Iterate Eval Cases"
+sidebarTitle: "Dataset"
+description: "Dataset loads eval cases from JSON or JSONL files. Each EvalCase contains the agent input, messages, expected outcomes, and optional metrics for grading."
+---
+
+`Dataset` is the entry point for loading evaluation cases into NorthStar's eval pipeline. It reads structured `EvalCase` records from JSON or JSONL files on disk, or directly from a list of Python dicts, and exposes them as an iterable collection. Each `EvalCase` describes one test scenario: the agent's input and conversation messages, what the expected outcome looks like, and any pre-measured performance metrics that deterministic graders can use.
+
+```python
+from northstar.evals import Dataset
+
+dataset = Dataset.from_path("dataset.json")
+for case in dataset:
+    print(case.id, case.expected.goal)
+```
+
+---
+
+## Dataset class
+
+### `Dataset.from_path(path)`
+
+Auto-detects the file format from the extension and delegates to `from_json` or `from_jsonl`. Raises `ValueError` for unsupported extensions.
+
+<ParamField path="path" type="str | Path" required>
+  Path to a `.json` or `.jsonl` file. The extension (case-insensitive) determines the parser: `.json` → `from_json`, `.jsonl` → `from_jsonl`. Any other extension raises `ValueError`.
+</ParamField>
+
+**Returns:** `Dataset`
+
+---
+
+### `Dataset.from_json(path)`
+
+Loads eval cases from a JSON file. The file may contain:
+- A **list** of case objects (`[{...}, {...}]`)
+- An **object with a `"cases"` key** whose value is a list (`{"cases": [{...}]}`)
+- A **single case object** (`{...}`) — wrapped in a one-element list
+
+Raises `ValueError` if the file is not valid JSON or if the structure does not match one of these shapes.
+
+<ParamField path="path" type="str | Path" required>
+  Path to the `.json` dataset file. Read as UTF-8.
+</ParamField>
+
+**Returns:** `Dataset`
+
+---
+
+### `Dataset.from_jsonl(path)`
+
+Loads eval cases from a JSONL file (one JSON object per line). Blank lines are skipped. Raises `ValueError` with a line number if any line contains invalid JSON or a malformed `EvalCase`.
+
+<ParamField path="path" type="str | Path" required>
+  Path to the `.jsonl` dataset file. Read as UTF-8, line-by-line.
+</ParamField>
+
+**Returns:** `Dataset`
+
+---
+
+### `Dataset.from_records(records)`
+
+Constructs a `Dataset` directly from a Python iterable of dicts. Each dict is validated against the `EvalCase` schema using Pydantic's `model_validate`. Useful for programmatically generated test cases.
+
+<ParamField path="records" type="Iterable[dict[str, Any]]" required>
+  An iterable of raw dictionaries. Each must be a valid `EvalCase` payload.
+</ParamField>
+
+**Returns:** `Dataset`
+
+---
+
+### `__iter__()` and `__len__()`
+
+`Dataset` implements both `__iter__` and `__len__`, making it compatible with `for` loops and `len()`.
+
+```python
+print(f"Loaded {len(dataset)} cases")
+for case in dataset:
+    result = run_agent(case)
+```
+
+---
+
+## EvalCase
+
+Each record in a dataset is validated and stored as an `EvalCase`. All fields use `extra="forbid"` — unknown keys in the JSON raise a validation error.
+
+<ResponseField name="id" type="str" required>
+  A unique identifier for this test case. Used to correlate `CaseResult` objects in the `EvalResult` back to specific dataset rows. Example: `"case-001"` or `"weather-query-paris"`.
+</ResponseField>
+
+<ResponseField name="input" type="Any">
+  The raw agent input for this case. May be a string, dict, or any JSON-serializable value. Also used to carry a `trace` payload when `trace` is not explicitly set: if `input` is a dict containing a `"trace"` key, `EvalSuite` will extract it automatically.
+</ResponseField>
+
+<ResponseField name="messages" type="list[dict[str, Any]]" required>
+  The full conversation history for this case in OpenAI message format. The `EvalSuite` parses these to reconstruct `system_prompts`, `user_messages`, `assistant_messages`, `tool_calls`, and `tool_outputs` for grading.
+</ResponseField>
+
+<ResponseField name="expected" type="EvalExpected">
+  Describes the expected outcome. Each grader reads specific fields from `expected` to decide whether to run and how to score. Defaults to an empty `EvalExpected` (all fields `None`), which causes every grader to skip gracefully.
+</ResponseField>
+
+<ResponseField name="metrics" type="EvalMetrics">
+  Pre-measured performance metrics for this case. Used by `LatencyUnder` and `CostUnder` graders. Defaults to an empty `EvalMetrics`.
+</ResponseField>
+
+<ResponseField name="metadata" type="dict[str, Any]">
+  Arbitrary key-value pairs attached to this case. Available to custom graders through `case.metadata`. Defaults to an empty dict.
+</ResponseField>
+
+<ResponseField name="trace" type="dict[str, Any] | None">
+  An optional raw trace payload (the JSON structure produced by `client.flush()`). When provided, `EvalSuite` reconstructs an `EvalTraceDag` for trace-aware graders like `BadToolFailureRecovery`, `UnnecessaryToolLoop`, and `HallucinatedToolResultJudge`. Defaults to `None`.
+</ResponseField>
+
+---
+
+## EvalExpected
+
+`EvalExpected` describes what a correct agent run looks like. Every field is optional — graders skip gracefully when their required field is absent.
+
+<ResponseField name="goal" type="str | None">
+  A natural-language description of what a correct response should achieve. Read by `RubricJudge` and `FaithfulnessJudge` as the primary evaluation criterion.
+</ResponseField>
+
+<ResponseField name="rubric" type="str | None">
+  A detailed rubric string that overrides `goal` inside `RubricJudge`. Use when you need more granular pass/fail criteria than a simple goal statement.
+</ResponseField>
+
+<ResponseField name="ground_truth" type="str | None">
+  The canonical correct answer. Read by `GroundTruthMatch` (substring match) and surfaced to `RubricJudge` as additional context.
+</ResponseField>
+
+<ResponseField name="context" type="list[str] | None">
+  Supporting documents or reference passages the agent was given. Read by `FaithfulnessJudge` to check whether claims in the response are grounded in evidence. A single string is also accepted and converted to a one-element list.
+</ResponseField>
+
+<ResponseField name="required_tools" type="list[str] | None">
+  Tool names that must appear in `run.tool_calls`. Read by `RequiredTools`. A single string is also accepted.
+</ResponseField>
+
+<ResponseField name="forbidden_tools" type="list[str] | None">
+  Tool names that must not appear in `run.tool_calls`. Read by `ForbiddenTools`. A single string is also accepted.
+</ResponseField>
+
+<ResponseField name="tool_sequence" type="list[str] | None">
+  The exact ordered list of tool names the agent must call. Read by `ToolSequence`. A single string is also accepted.
+</ResponseField>
+
+<ResponseField name="tool_arguments" type="list[ExpectedToolArguments] | None">
+  Expected tool names with their expected argument subsets. Read by `ToolArgumentsMatch`. Each entry has a `name` (tool name) and `arguments` (dict — actual arguments must be a superset).
+</ResponseField>
+
+<ResponseField name="require_tool_output_reference" type="bool | None">
+  When `True`, `ToolOutputReferenced` checks that the final response meaningfully references content from at least one tool output. When `False` or `None`, the grader skips.
+</ResponseField>
+
+<ResponseField name="max_tool_calls" type="int | None">
+  Maximum allowed number of tool calls. Read by `MaxToolCalls`. Must be non-negative.
+</ResponseField>
+
+<ResponseField name="contains" type="list[str] | None">
+  Phrases that must appear (case-insensitive) in the final response. Read by `Contains`. A single string is also accepted.
+</ResponseField>
+
+<ResponseField name="not_contains" type="list[str] | None">
+  Phrases that must not appear (case-insensitive) in the final response. Read by `NotContains`. A single string is also accepted.
+</ResponseField>
+
+<ResponseField name="max_latency_ms" type="float | None">
+  Maximum allowed latency in milliseconds. Read by `LatencyUnder` against `case.metrics.latency_ms`. Must be non-negative.
+</ResponseField>
+
+<ResponseField name="max_cost_usd" type="float | None">
+  Maximum allowed cost in USD. Read by `CostUnder` against `case.metrics.cost_usd`. Must be non-negative.
+</ResponseField>
+
+<ResponseField name="trace" type="TraceExpected | None">
+  Trace-level constraints for trace-aware graders. See `TraceExpected` below.
+</ResponseField>
+
+### TraceExpected
+
+`TraceExpected` is nested inside `EvalExpected.trace` and provides constraints for trace-aware graders.
+
+<ResponseField name="max_repeated_tool_calls" type="int | None">
+  Maximum number of times the same tool signature may repeat before `UnnecessaryToolLoop` fires. Must be positive. Defaults to `3` inside the grader when `None`.
+</ResponseField>
+
+<ResponseField name="allowed_state_transitions" type="list[ExpectedStateTransition] | None">
+  List of `{from_state, to_state}` pairs that are permitted. Read by `InvalidStateTransition`. Any state transition not in this list causes a failure.
+</ResponseField>
+
+<ResponseField name="relevant_retrieval_ids" type="list[str] | None">
+  The set of document IDs that should have been retrieved. Used by `RetrievalPrecisionRecall` as the ground-truth relevance set.
+</ResponseField>
+
+<ResponseField name="min_retrieval_precision" type="float | None">
+  Minimum acceptable retrieval precision (0–1). Used by `RetrievalPrecisionRecall`.
+</ResponseField>
+
+<ResponseField name="min_retrieval_recall" type="float | None">
+  Minimum acceptable retrieval recall (0–1). Used by `RetrievalPrecisionRecall`.
+</ResponseField>
+
+<ResponseField name="max_step_cost_usd" type="float | None">
+  Maximum allowed cost per individual span. Read by `StepCostAttribution`. Must be non-negative.
+</ResponseField>
+
+---
+
+## EvalMetrics
+
+`EvalMetrics` carries pre-measured performance values for a case.
+
+<ResponseField name="latency_ms" type="float | None">
+  The measured end-to-end latency for this case in milliseconds. Used by `LatencyUnder`.
+</ResponseField>
+
+<ResponseField name="cost_usd" type="float | None">
+  The measured total cost in USD for this case. Used by `CostUnder`.
+</ResponseField>
+
+---
+
+## Dataset file formats
+
+### JSON array format
+
+```json
+[
+  {
+    "id": "case-001",
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"},
+      {"role": "assistant", "content": "The capital of France is Paris."}
+    ],
+    "expected": {
+      "goal": "Correctly identify the capital city of France.",
+      "ground_truth": "Paris",
+      "contains": ["Paris"],
+      "required_tools": []
+    },
+    "metrics": {
+      "latency_ms": 320.5,
+      "cost_usd": 0.000042
+    }
+  },
+  {
+    "id": "case-002",
+    "messages": [
+      {"role": "user", "content": "Search for the latest AI news and summarize it."},
+      {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search_web", "arguments": "{\"query\": \"latest AI news\"}"}}]},
+      {"role": "tool", "tool_call_id": "call_1", "content": "OpenAI released GPT-5..."},
+      {"role": "assistant", "content": "The latest AI news: OpenAI released GPT-5."}
+    ],
+    "expected": {
+      "goal": "Use the search tool and summarize findings faithfully.",
+      "required_tools": ["search_web"],
+      "require_tool_output_reference": true,
+      "max_tool_calls": 3
+    }
+  }
+]
+```
+
+### JSON object with `cases` key format
+
+```json
+{
+  "cases": [
+    {
+      "id": "weather-paris",
+      "messages": [
+        {"role": "user", "content": "What's the weather in Paris?"},
+        {"role": "assistant", "content": "I'll check that for you.", "tool_calls": [{"id": "tc_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
+        {"role": "tool", "tool_call_id": "tc_1", "content": "{\"temp_c\": 22, \"condition\": \"sunny\"}"},
+        {"role": "assistant", "content": "It is 22°C and sunny in Paris."}
+      ],
+      "expected": {
+        "goal": "Report the current weather in Paris accurately using the weather tool.",
+        "required_tools": ["get_weather"],
+        "tool_sequence": ["get_weather"],
+        "tool_arguments": [{"name": "get_weather", "arguments": {"city": "Paris"}}],
+        "contains": ["22", "Paris"],
+        "require_tool_output_reference": true,
+        "max_tool_calls": 1,
+        "max_latency_ms": 5000,
+        "max_cost_usd": 0.01
+      },
+      "metrics": {"latency_ms": 1200, "cost_usd": 0.0005}
+    }
+  ]
+}
+```
+
+### JSONL format
+
+```json
+{"id": "case-001", "messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi!"}], "expected": {"contains": ["Hi"]}}
+{"id": "case-002", "messages": [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4"}], "expected": {"ground_truth": "4", "goal": "Answer the arithmetic question correctly."}}
+```
+
+<Note>
+  JSONL files must have one complete JSON object per line. Blank lines are skipped automatically. Each line is validated independently, so a single invalid line raises a `ValueError` with its line number.
+</Note>

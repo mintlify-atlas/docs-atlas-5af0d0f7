@@ -1,0 +1,193 @@
+---
+title: "Auto-Instrument OpenAI and Anthropic Clients"
+sidebarTitle: "Auto-Instrumentation"
+description: "Call northstar.auto_instrument() once to automatically capture all OpenAI and Anthropic API calls, including messages, tool calls, token usage, and USD cost."
+---
+
+`northstar.auto_instrument()` monkey-patches the OpenAI and Anthropic Python client libraries so that every LLM API call is captured as a model span inside the current NorthStar trace — without any changes to the call sites themselves. It must be called **before** `northstar.init()` and before any OpenAI or Anthropic client instances are created. Calling it after the libraries have already been imported and instantiated will still patch the class methods, but calling it first guarantees the patch is in place before any client object is used.
+
+<Note>
+`auto_instrument()` patches class-level methods (`Completions.create`, `AsyncCompletions.create`, `Responses.create`, `AsyncResponses.create`, `Messages.create`, `AsyncMessages.create`). The patch is applied once per process and is idempotent.
+</Note>
+
+## Quick Start
+
+<Steps>
+  <Step title="Install NorthStar">
+    ```bash
+    uv add northstar-ai
+    ```
+    For USD cost tracking, install the optional pricing extra:
+    ```bash
+    uv add 'northstar-ai[pricing]'
+    ```
+  </Step>
+  <Step title="Set credentials">
+    ```bash
+    export NORTHSTAR_API_KEY="ns_..."
+    export NORTHSTAR_PROJECT_ID="<supabase-project-ref>"
+    ```
+  </Step>
+  <Step title="Call auto_instrument() before init()">
+    ```python
+    import northstar
+
+    northstar.auto_instrument()   # patch FIRST
+    northstar.init(
+        api_key=os.environ["NORTHSTAR_API_KEY"],
+        project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+        project="Support Agent",
+        environment="production",
+    )
+    ```
+  </Step>
+</Steps>
+
+## Anthropic Example
+
+The example below mirrors the NorthStar quick-start. A single `client.messages.create()` call is automatically captured as a model span with all messages, token usage, and cost.
+
+```python
+import os
+
+import anthropic
+import northstar
+
+northstar.auto_instrument()  # instruments openai + anthropic
+northstar.init(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    project="Support Agent",
+    environment="production",
+)
+
+client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+response = client.messages.create(
+    model="claude-sonnet-4-5-20250929",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "How do I reset my password?"}],
+)
+northstar.flush()
+```
+
+## OpenAI Example
+
+Auto-instrumentation covers both the Chat Completions API and the newer Responses API, including their async variants.
+
+<CodeGroup>
+```python Chat Completions
+import os
+
+import openai
+import northstar
+
+northstar.auto_instrument()
+northstar.init(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    project="Support Agent",
+    environment="production",
+)
+
+client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Summarise this article for me."}],
+)
+northstar.flush()
+```
+
+```python Responses API
+import os
+
+import openai
+import northstar
+
+northstar.auto_instrument()
+northstar.init(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+    project="Support Agent",
+    environment="production",
+)
+
+client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+response = client.responses.create(
+    model="gpt-4o",
+    input="What is the capital of France?",
+)
+northstar.flush()
+```
+
+```python Async
+import asyncio
+import os
+
+import openai
+import northstar
+
+northstar.auto_instrument()
+northstar.init(
+    api_key=os.environ["NORTHSTAR_API_KEY"],
+    project_id=os.environ["NORTHSTAR_PROJECT_ID"],
+)
+
+client = openai.AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+async def main():
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": "Hello!"}],
+    )
+    northstar.flush()
+
+asyncio.run(main())
+```
+</CodeGroup>
+
+## What Is Captured
+
+Every instrumented call records the following data automatically:
+
+| Field | Details |
+|-------|---------|
+| **Request messages** | The full `messages` array passed to the API, including system prompts |
+| **Tools / tool\_choice** | Tool schemas and any `tool_choice` constraint |
+| **Model-emitted tool calls** | Tool call objects in the assistant message |
+| **Tool result messages** | `role: "tool"` messages included in subsequent LLM requests |
+| **Output message** | The first choice's message (Chat Completions) or `output_text` (Responses API) |
+| **Token usage** | `input_tokens`, `output_tokens`, `total_tokens` stored on the span's attributes |
+| **USD cost** | Computed via `litellm` pricing and stored as `cost_usd` on the span |
+| **Latency** | Wall-clock time from request to response, stored as `latency_ms` |
+| **Exceptions** | Any exception raised by the API call is recorded and the span is marked `ERROR` |
+
+<Warning>
+**Local tool execution is not traced automatically.** The instrumentation only captures what passes through the LLM API boundary. If you want to trace the execution of your own tool functions, wrap them with [`@northstar.observe`](/tracing/manual-tracing) or a `with northstar.span(...)` block.
+</Warning>
+
+## USD Cost Tracking
+
+Cost computation requires the `litellm` package, which is bundled in the `pricing` extra:
+
+```bash
+uv add 'northstar-ai[pricing]'
+```
+
+Without this extra, token counts are still recorded but `cost_usd` will be absent from span attributes. The `pricing_source` attribute on the span will be `"litellm"` when pricing succeeds or `"unknown"` when the model is not found in litellm's price list.
+
+<Tip>
+Set `debug=True` in `northstar.init()` to print a confirmation message to stderr each time auto-instrumentation patches a method. This is useful for verifying the patch is applied before your first API call.
+</Tip>
+
+## Covered Endpoints
+
+| Library | Patched method | Sync | Async |
+|---------|---------------|------|-------|
+| `openai` | `chat.completions.create` | ✓ | ✓ |
+| `openai` | `responses.create` | ✓ | ✓ |
+| `anthropic` | `messages.create` | ✓ | ✓ |
+
+If the `openai` or `anthropic` package is not installed, the corresponding patch is silently skipped — no error is raised.
