@@ -1,7 +1,7 @@
 ---
-title: "Sessions, Runs, and the Low-Level Client"
+title: "Sessions, Runs, and the Low-Level Northstar Client"
 sidebarTitle: "Sessions & Runs"
-description: "Use the Northstar low-level client to manage sessions and runs directly, attach scores, and control capture options per run."
+description: "Use the Northstar low-level client to manage sessions and runs directly, attach evaluation scores to traces, and control capture options per run."
 ---
 
 The high-level `northstar.init()` API is designed for the common case: one long-lived session per process, runs created automatically by `@northstar.trace`, and a shared background worker. The low-level `Northstar` client gives you direct control over every layer of the hierarchy. Use it when you need to manage session boundaries explicitly, attach evaluation scores to individual runs, customize which event types are captured, or integrate NorthStar into a framework that manages its own execution lifecycle.
@@ -87,7 +87,7 @@ with client.session(metadata={"source": "cli"}) as session:
             pass
 
         run.record_final_response("Documentation found.")
-        client.score(run.id, "relevance", 0.92, source="human")
+        client.score(run.id, "relevance", 0.92)
 ```
 
 <Note>
@@ -103,7 +103,6 @@ client.score(
     run.id,        # str | UUID — the run to attach the score to
     "relevance",   # name
     0.92,          # float → numeric score
-    source="human",
 )
 
 # Categorical score (string value)

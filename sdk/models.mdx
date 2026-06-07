@@ -1,7 +1,7 @@
 ---
 title: "NorthStar Data Models — Session, Run, Span, Event"
 sidebarTitle: "Models"
-description: "Reference for the core Pydantic models: Session, Run, Span, Event, Score, SpanKind, RunStatus, and CaptureOptions. All are exported from the northstar package."
+description: "Reference for core Pydantic models: Session, Run, Span, Event, Score, SpanKind, RunStatus, and CaptureOptions — all exported from the northstar package."
 ---
 
 NorthStar's trace store is built around five core Pydantic models: **Session**, **Run**, **Span**, **Event**, and **Score**. Every trace your agent produces maps to one or more of these models. `Session`, `Run`, and `Span` implement Python's context manager protocol — open them with `with`, and the SDK automatically sets timestamps, captures exceptions, and flushes the record to the backend when the block exits.
@@ -332,11 +332,11 @@ client = Northstar(
 
 ```python
 with client.session() as session:          # __enter__: returns self
-    with session.run("agent") as run:      # __enter__: returns self, enqueues run
+    with session.run("agent") as run:      # session.run() creates & enqueues the run; __enter__ returns self
         with run.span("tool", kind=SpanKind.TOOL) as span:  # pushes onto active stack
             ...
         # __exit__: span ended_at set, status = OK or ERROR, enqueued
-    # __exit__: run ended_at set, model costs aggregated, enqueued
+    # __exit__: run ended_at set, model costs aggregated, re-enqueued
 # __exit__: session ended_at set, flush() called
 ```
 

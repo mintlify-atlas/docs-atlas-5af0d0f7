@@ -1,7 +1,7 @@
 ---
-title: "Dataset — Load and Iterate Eval Cases"
+title: "Dataset — Load and Iterate Eval Cases for NorthStar"
 sidebarTitle: "Dataset"
-description: "Dataset loads eval cases from JSON or JSONL files. Each EvalCase contains the agent input, messages, expected outcomes, and optional metrics for grading."
+description: "Dataset loads EvalCase records from JSON or JSONL files. Each case carries agent messages, expected outcomes, and performance metrics for grading."
 ---
 
 `Dataset` is the entry point for loading evaluation cases into NorthStar's eval pipeline. It reads structured `EvalCase` records from JSON or JSONL files on disk, or directly from a list of Python dicts, and exposes them as an iterable collection. Each `EvalCase` describes one test scenario: the agent's input and conversation messages, what the expected outcome looks like, and any pre-measured performance metrics that deterministic graders can use.

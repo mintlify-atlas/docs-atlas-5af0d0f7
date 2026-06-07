@@ -1,7 +1,7 @@
 ---
-title: "Evaluating AI Agent Runs with NorthStar"
+title: "NorthStar Evals: Evaluate AI Agent Runs and Tool Use"
 sidebarTitle: "Overview"
-description: "NorthStar's eval framework runs deterministic graders and LLM judges over a dataset of agent runs. Define expected outcomes, run EvalSuite, and review pass rates by case."
+description: "Run deterministic graders and LLM judges over agent runs. Define expected outcomes, pick a grader plan, and review per-case pass rates with EvalSuite."
 ---
 
 The NorthStar eval framework gives you a structured way to measure whether your AI agent is behaving correctly — before it reaches production and after every change you make to it. You define a dataset of representative inputs, attach expected outcomes to each case, choose a grader plan, and run `EvalSuite`. NorthStar evaluates every case against every grader, skips checks that are not relevant (instead of failing them), and returns a summary of pass rates broken down by case and grader. Use evals to catch regressions in tool usage, output quality, latency budgets, and cost — all from a single `suite.run(dataset)` call.
@@ -12,10 +12,10 @@ The example below loads a JSON dataset, runs the default `"deterministic"` plan,
 
 <Steps>
   <Step title="Install the eval extras">
-    LLM judges require LiteLLM. Install the optional pricing extras if you plan to use `RubricJudge` or `FaithfulnessJudge`.
+    LLM judges require LiteLLM. Install the optional evals extras if you plan to use `RubricJudge` or `FaithfulnessJudge`.
 
     ```bash
-    uv add 'northstar-ai[pricing]'
+    uv add 'northstar-ai[evals]'
     ```
 
     The deterministic graders have no extra dependencies.
@@ -157,6 +157,10 @@ suite = EvalSuite(plan="trace")
 
 <ResponseField name="evaluated_cases" type="int">
   Cases where at least one grader produced a PASSED or FAILED result (i.e., was not entirely skipped).
+</ResponseField>
+
+<ResponseField name="not_evaluated_cases" type="int">
+  Cases where every grader was skipped — no expected fields were set that triggered a grade.
 </ResponseField>
 
 <ResponseField name="passed_cases" type="int">

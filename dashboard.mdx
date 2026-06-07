@@ -1,10 +1,10 @@
 ---
-title: "NorthStar Dashboard Guide"
+title: "NorthStar Dashboard: Local Setup and Feature Reference"
 sidebarTitle: "Dashboard"
-description: "The NorthStar dashboard is a Next.js app that visualizes traces, manages prompt versions, runs evals, and configures alert rules across multiple projects."
+description: "Set up the NorthStar Next.js dashboard to visualize traces, manage prompt versions, run evals, and configure alert rules across your projects."
 ---
 
-The NorthStar dashboard is a Next.js 14 application that connects directly to the same Supabase project as your SDK. It provides a real-time window into every trace, session, and LLM call your agents produce — along with tools for managing prompt versions, running evaluations against datasets, and configuring alert rules with webhook delivery.
+The NorthStar dashboard is a Next.js 14 application that connects directly to the same Supabase project as your SDK. It provides a real-time window into every trace, session, and LLM call your agents produce — along with tools for managing prompt versions, running evaluations against datasets, and configuring alert rules and webhook endpoints.
 
 ## Feature overview
 
@@ -104,7 +104,7 @@ The Settings section of the dashboard lets you define alert rules scoped to a pr
 | `latency_p95` | Fires when the P95 run latency exceeds the configured threshold (in milliseconds). |
 | `token_budget` | Fires when token usage in a window exceeds the configured threshold. |
 
-Each rule can be toggled enabled or disabled without deleting it. When an enabled rule fires, NorthStar delivers a webhook `POST` request to every active webhook URL registered for the project. Configure webhook URLs in Settings → Webhooks.
+Each rule can be toggled enabled or disabled without deleting it. Webhook URLs are registered per project in Settings → Webhooks; each webhook has a status of `active` or `paused`.
 
 ## Connecting to your Supabase project
 

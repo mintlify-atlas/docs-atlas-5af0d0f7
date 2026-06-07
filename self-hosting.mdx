@@ -1,7 +1,7 @@
 ---
-title: "Self-Host NorthStar on Supabase"
+title: "Self-Host NorthStar: Supabase Migrations and Edge Function"
 sidebarTitle: "Self-Hosting"
-description: "Deploy NorthStar's ingest pipeline and database by applying the SQL migrations to a Supabase project and deploying the Edge Function. No external services required."
+description: "Deploy NorthStar's ingest pipeline on Supabase by applying 26 SQL migrations and deploying the ingest Edge Function. No external services required."
 ---
 
 NorthStar's entire backend runs on Supabase: a private Postgres schema holds all trace data, a Deno/TypeScript Edge Function handles authenticated ingest, and Row Level Security enforces multi-tenant isolation. There are no third-party services to configure. All you need is a Supabase account and the Supabase CLI.

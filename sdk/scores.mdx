@@ -1,7 +1,7 @@
 ---
-title: "Attaching Scores to Agent Runs"
+title: "Attaching Quality Scores to Agent Runs in NorthStar"
 sidebarTitle: "Scores"
-description: "Use client.score() to attach numeric or string quality scores to any run. Scores track human feedback, eval results, and automated quality signals in the trace store."
+description: "Use client.score() to attach numeric, boolean, or categorical scores to any run. Track human feedback, eval results, and quality signals in NorthStar."
 ---
 
 Scores are quality signals you attach to a run after it completes. They let you correlate human feedback, automated eval results, and computed metrics directly with the trace data that produced them. Each score is stored in the trace database alongside the run's spans and events, and is immediately visible on the NorthStar dashboard. You can attach multiple scores per run — for example, one for relevance, one for faithfulness, and one for human thumbs-up feedback.

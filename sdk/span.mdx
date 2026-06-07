@@ -1,7 +1,7 @@
 ---
-title: "northstar.span() — Create a Child Span"
+title: "northstar.span() — Open a Child Span in an Active Trace"
 sidebarTitle: "span()"
-description: "Open a child span inside an active trace using northstar.span(). Use SpanKind to categorize spans as tool calls, model calls, retrieval operations, or custom steps."
+description: "Open a child span inside an active trace with northstar.span(). Use SpanKind to label spans as tool, model, agent, workflow, or custom steps."
 ---
 
 `northstar.span()` is a **context manager** that opens a child span inside the currently active trace, runs the code block inside the `with` statement, then closes the span when the block exits — recording latency, status, and any errors automatically. Use `span()` when you want to trace an inline code block rather than wrapping an existing function with `@northstar.observe()`. Spans can be freely nested; parent-child relationships are resolved automatically via Python `ContextVar`s so you never need to pass handles manually.

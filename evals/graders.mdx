@@ -1,7 +1,7 @@
 ---
-title: "Deterministic Graders for Agent Evaluation"
+title: "Built-in Deterministic Graders for Agent Evaluation"
 sidebarTitle: "Graders"
-description: "NorthStar includes 11+ built-in deterministic graders covering tool calls, output content, latency, and cost. Each grader is skipped automatically when its expected field is absent."
+description: "NorthStar's deterministic graders check tool calls, output content, latency, and cost. Each grader skips automatically when its expected field is absent."
 ---
 
 Deterministic graders evaluate agent runs without calling an LLM. They compare concrete facts — which tools were called, in what order, with what arguments, what the response contained, how long the run took, and how much it cost — against the expected values you declare in each dataset case. Graders never guess: if the expected field they need is absent, they return `SKIPPED` rather than `FAILED`. This means you can incrementally add graders to a dataset without breaking existing cases that don't set the corresponding fields.

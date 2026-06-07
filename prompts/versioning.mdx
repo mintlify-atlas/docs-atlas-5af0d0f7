@@ -1,7 +1,7 @@
 ---
 title: "Prompt Versions and Labels"
 sidebarTitle: "Versioning"
-description: "Every prompt edit creates a new version with an incremented number and content hash. Labels like 'production' pin a named pointer to any version for safe rollout."
+description: "Every prompt edit creates an immutable version with a content hash. Labels like 'production' pin a pointer to any version for safe, code-free rollouts."
 ---
 
 NorthStar treats every prompt edit as an immutable append. When you save a change to a prompt in the dashboard, the existing version is never modified — instead, a new `PromptVersion` record is created with an incremented `version_number`, a fresh `content_hash`, and a reference to its `parent_version_id`. This means the full edit history of any prompt is always available, old versions can be re-deployed by moving a label, and you can always determine exactly which content was active at the time a trace was recorded.
@@ -105,9 +105,15 @@ Because traces store the `prompt_version_id` at the time of compilation, you can
 A label is a string key in the `Prompt.labels` dict that maps to a version UUID. Labels let you decouple deployment decisions from code changes — your code always asks for `label="production"`, and you control which version that resolves to entirely from the dashboard.
 
 ```python
+from northstar import Northstar
+
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+
 # Always pulls whatever version the "production" label currently points to
-with northstar.pull_prompt("summarizer", label="production") as prompt:
-    compiled = prompt.compile(doc=doc_text, max_words=120)
+prompt = client.pull_prompt("summarizer", label="production")
+
+with prompt.bind(variables={"doc": doc_text, "max_words": 120}) as compiled:
+    # compiled.content is the fully rendered string
     ...
 ```
 
@@ -122,7 +128,7 @@ Common label conventions:
 <Tip>
   You can create any label name in the dashboard. There is no fixed set of
   valid labels — `"production"` and `"staging"` are conventions, not reserved
-  words.
+  words. The default label used when none is specified is `"prod"`.
 </Tip>
 
 ## Resolving a specific version by number
@@ -130,9 +136,14 @@ Common label conventions:
 If you need to pin to an exact version number rather than a label — for example in a deterministic eval run — pass `version` to `pull_prompt`:
 
 ```python
+from northstar import Northstar
+
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+
 # Pull version 3 of the summarizer prompt exactly, regardless of labels
-with northstar.pull_prompt("summarizer", label="staging", version=3) as prompt:
-    compiled = prompt.compile(doc=doc_text, max_words=120)
+prompt = client.pull_prompt("summarizer", label="staging", version=3)
+
+with prompt.bind(variables={"doc": doc_text, "max_words": 120}) as compiled:
     ...
 ```
 
@@ -141,10 +152,15 @@ with northstar.pull_prompt("summarizer", label="staging", version=3) as prompt:
 The `content_hash` field lets you detect whether the prompt content seen at trace time matches the version you expect. If a label is moved from v3 to v4 between two runs, the `content_hash` on the prompt links in those traces will differ, making it easy to group and compare results by actual content rather than version number alone.
 
 ```python
-with northstar.pull_prompt("summarizer", label="production") as prompt:
-    # Inspect the hash before compiling
-    print(f"Running with content hash: {prompt.content_hash}")
-    compiled = prompt.compile(doc=doc_text, max_words=120)
+from northstar import Northstar
+
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+prompt = client.pull_prompt("summarizer", label="production")
+
+# Inspect the hash before compiling
+print(f"Running with content hash: {prompt.content_hash}")
+
+with prompt.bind(variables={"doc": doc_text, "max_words": 120}) as compiled:
     ...
 ```
 
@@ -153,6 +169,8 @@ with northstar.pull_prompt("summarizer", label="production") as prompt:
 Variables are extracted from the template content automatically when a version is created. NorthStar scans the content for both `{{ jinja }}` and `{python}` placeholders and stores the result in `variables`. This means you never have to declare your variable schema manually — the schema is always in sync with the actual template content.
 
 ```python
+from northstar import PromptVersion
+
 version = PromptVersion(
     id=...,
     prompt_id=...,

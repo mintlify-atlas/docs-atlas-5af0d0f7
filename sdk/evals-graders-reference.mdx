@@ -1,7 +1,7 @@
 ---
-title: "Graders and EvalSuite Reference"
+title: "Graders and EvalSuite — NorthStar Evals Reference"
 sidebarTitle: "Graders Reference"
-description: "Complete reference for EvalSuite, all built-in Grader classes, grader_plan(), GradeResult fields, and the Grader protocol for custom graders."
+description: "Complete reference for EvalSuite, all 20+ built-in Grader classes, grader_plan() bundles, GradeResult fields, and the custom Grader protocol."
 ---
 
 NorthStar's eval system is built around three concepts: a **Dataset** of `EvalCase` records, a list of **Graders** that score each case, and an **EvalSuite** that orchestrates the run and aggregates results. Graders are plain Python objects with a `grade(case, run)` method — they are deterministic functions, regex checks, code runners, or LLM-backed judges. You compose them freely, or pick a pre-built `grader_plan()` bundle.
@@ -36,7 +36,7 @@ print(f"Pass rate: {result.pass_rate:.1%} ({result.passed_cases}/{result.evaluat
 ### Constructor
 
 ```python
-EvalSuite(graders=None, *, plan="deterministic", metadata={})
+EvalSuite(graders=None, *, plan="deterministic", metadata=None)
 ```
 
 <ParamField path="graders" type="list[Grader] | None">

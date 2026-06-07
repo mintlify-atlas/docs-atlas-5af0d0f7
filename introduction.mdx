@@ -1,5 +1,5 @@
 ---
-title: "NorthStar: AI Agent Observability Platform"
+title: "NorthStar: AI Agent Observability and Evaluation Platform"
 sidebarTitle: "Introduction"
 description: "NorthStar provides traces, spans, LLM cost tracking, and evaluations for AI agents. Learn what it records, why it matters, and how the data flows."
 ---
@@ -24,7 +24,7 @@ A **Session** groups one or more **Runs** — for example, all steps in a single
 
 Every piece of data collected by the SDK follows the same path from your application to the dashboard:
 
-```
+```text
 Agent App (Python) ──► SDK ──► Supabase Edge Function ──► Postgres ──► Dashboard
                           │            (Deno/TS)            (RLS)
                           └─► local queue + background worker
@@ -36,7 +36,7 @@ Records are buffered in an in-process queue and sent by a background daemon thre
 
 The full component map for the SDK and backend looks like this:
 
-```
+```text
 Agent App (Python)
     │
     ▼
@@ -81,7 +81,7 @@ Postgres (migrations/)
     `@northstar.trace` and `@northstar.observe` decorators (plus context manager forms) let you nest spans arbitrarily deep. `ContextVar` propagation ensures correct parent-child linking across async and threaded code.
   </Card>
   <Card title="Versioned Prompts" icon="file-lines">
-    Store prompt templates server-side with `northstar.pull_prompt()`, compile them with Jinja or Python-style variables, and bind compiled versions directly to model call spans for full prompt lineage.
+    Store prompt templates server-side and retrieve them with `client.pull_prompt()` on the low-level `Northstar` client. Compile templates with Jinja or Python-style variables, and bind compiled versions directly to model call spans for full prompt lineage.
   </Card>
   <Card title="Evaluations" icon="chart-bar">
     `northstar.evals` provides dataset loaders, deterministic graders (`output`, `tool_sequence`, `retrieval`, `regex`, `python_code`, and more), and LLM-judge rubrics for systematic agent evaluation.

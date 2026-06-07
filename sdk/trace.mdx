@@ -1,7 +1,7 @@
 ---
-title: "northstar.trace() — Trace a Function or Block"
+title: "northstar.trace() — Wrap Functions and Blocks as Trace Runs"
 sidebarTitle: "trace()"
-description: "Wrap a function or code block with northstar.trace() to create a top-level trace run. Supports decorator and context manager forms, and captures input/output automatically."
+description: "Use northstar.trace() to create a top-level run. Works as a decorator or context manager, capturing inputs, outputs, latency, and exceptions automatically."
 ---
 
 `northstar.trace()` marks the outermost boundary of a single agent invocation, creating a **Run** record in NorthStar. Every span, event, metric, and log call made while the trace is active is associated with that run. The function works in two forms: as a **decorator** (applied to a function) and as a **context manager** (used with `with`). Both forms automatically capture inputs, outputs, latency, and exceptions, and both support `async` functions.
@@ -112,6 +112,21 @@ Inside the `with` block, the context manager yields a `_TraceHandle` (or a silen
 
   ```python
   trace.log_metadata({"user_id": "u_123", "plan": "pro"})
+  ```
+</ResponseField>
+
+<ResponseField name="model_call(name, *, model)" type="method → context manager">
+  Opens a `SpanKind.MODEL` span attached directly to this run and yields a `ModelSpan` handle. Use this as a context manager to record LLM input messages, output messages, and token usage when you already hold a `_TraceHandle` reference.
+
+  ```python
+  with trace.model_call("answer-llm", model="gpt-4o") as llm:
+      llm.record_input_messages(messages)
+      response = openai_client.chat.completions.create(model="gpt-4o", messages=messages)
+      llm.record_output_message(response.choices[0].message.model_dump())
+      llm.record_usage(
+          prompt_tokens=response.usage.prompt_tokens,
+          completion_tokens=response.usage.completion_tokens,
+      )
   ```
 </ResponseField>
 

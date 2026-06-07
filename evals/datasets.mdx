@@ -1,7 +1,7 @@
 ---
-title: "Loading and Structuring Eval Datasets"
+title: "Structuring and Loading Eval Datasets in NorthStar"
 sidebarTitle: "Datasets"
-description: "Create eval datasets as JSON or JSONL files. Each case defines an input, expected outcomes, and optional metrics. Load them with Dataset.from_path() or Dataset.from_records()."
+description: "Structure eval datasets as JSON or JSONL. Each EvalCase defines messages, expected outcomes, and optional metrics. Load datasets with Dataset.from_path()."
 ---
 
 A dataset is the starting point for every eval run. It holds the collection of agent conversations you want to evaluate — each one paired with the expected outcomes NorthStar will grade against. Without a dataset there is nothing to evaluate; with a well-structured one, NorthStar can tell you exactly which cases pass, which fail, and why. Datasets can be loaded from JSON or JSONL files on disk, or constructed in memory from Python dicts. The `Dataset` class is iterable and supports `len()`, so it integrates directly with `EvalSuite.run()`.

@@ -1,7 +1,7 @@
 ---
 title: "LLMService — LiteLLM Wrapper with Native Tracing"
 sidebarTitle: "LLMService"
-description: "LLMService wraps LiteLLM's completion API and records model spans, token usage, and USD cost automatically. Supports sync, async, streaming, and async streaming."
+description: "LLMService wraps LiteLLM and records MODEL spans, token usage, and USD cost automatically. Supports sync, async, streaming, and async streaming generation."
 ---
 
 `LLMService` is a thin, opinionated wrapper around [LiteLLM](https://docs.litellm.ai/) that integrates NorthStar tracing into every completion call without any boilerplate. Every method creates a `MODEL` span, records input messages, captures the output message, and reports prompt and completion token counts along with the USD cost — all automatically. You only need to call `llm.generate()` the same way you would call `litellm.completion()`.
@@ -286,6 +286,7 @@ Every `LLMService` method creates a `MODEL` span and records the following witho
 
 | Recorded data | Source |
 |---|---|
+| `MODEL` span named `"llm.generate"` / `"llm.agenerate"` / `"llm.stream"` / `"llm.astream"` | `api.model_call()` |
 | Input messages (per `CaptureOptions`) | `span.record_input_messages()` |
 | Output message (per `CaptureOptions`) | `span.record_output_message()` |
 | `model`, `input_tokens`, `output_tokens`, `total_tokens` | `span.record_usage()` |

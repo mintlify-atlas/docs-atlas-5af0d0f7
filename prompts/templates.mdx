@@ -1,7 +1,7 @@
 ---
 title: "Prompt Template Syntax and Compilation"
 sidebarTitle: "Templates"
-description: "NorthStar prompt templates support both Jinja2-style double-brace syntax and Python str.format-style single-brace variables. Missing variables raise a validation error at compile time."
+description: "NorthStar templates support Jinja2 double-brace and Python single-brace syntax. Missing variables raise a ValueError at compile time before any LLM call."
 ---
 
 NorthStar prompt templates are plain strings with variable placeholders embedded directly in the content. When you compile a template, the SDK replaces every placeholder with the value you supply — and if any placeholder has no corresponding value, it raises a `ValueError` immediately rather than leaving a gap in the rendered output. The template engine supports two placeholder styles so you can use whichever feels natural for your team or mix them freely in a single template.
@@ -73,24 +73,39 @@ print(compiled.raw_content)
 
 `bind()` is a context manager on `CompiledPrompt` that compiles the underlying template with the given variables and, when the block exits, records a prompt link on the target span. This is the preferred way to associate a prompt version with a model call span when you need explicit control over which span receives the link.
 
+`client.pull_prompt()` returns a `CompiledPrompt` pre-loaded with the resolved `PromptVersion`. Call `bind()` on that object to render and link it:
+
 ```python
-with northstar.pull_prompt("summarizer", label="production") as prompt:
-    with northstar.model_call("summarise", model="gpt-4o") as llm:
-        with prompt.bind(
-            variables={"doc": doc_text, "max_words": 120},
-            span=llm,
-        ) as compiled:
-            llm.record_input_messages([{"role": "user", "content": compiled.content}])
+from northstar import Northstar
+
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+prompt = client.pull_prompt("summarizer", label="production")
+
+with client.session() as session:
+    with session.run("agent") as run:
+        with run.span("chat") as span:
+            with prompt.bind(
+                variables={"doc": doc_text, "max_words": 120},
+                span=span,
+            ) as compiled:
+                # compiled.content is the fully rendered string
+                response = call_llm(model="gpt-4o", content=compiled.content)
 ```
 
 When `span` is omitted, `bind()` automatically picks up the active model call span from the current context — so in most cases you do not need to pass it explicitly:
 
 ```python
-with northstar.pull_prompt("greeting") as prompt:
-    with northstar.model_call("chat", model="gpt-4o-mini"):
-        with prompt.bind(variables={"name": "Ada"}) as compiled:
-            # compiled.content == "Hello Ada."
-            ...
+from northstar import Northstar, model_call
+
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+prompt = client.pull_prompt("greeting")
+
+with client.session() as session:
+    with session.run("agent") as run:
+        with model_call("chat", model="gpt-4o-mini", run=run):
+            with prompt.bind(variables={"name": "Ada"}) as compiled:
+                # compiled.content == "Hello Ada."
+                ...
 ```
 
 <Note>
@@ -148,6 +163,8 @@ with northstar.pull_prompt("greeting") as prompt:
 If any variable referenced in the template is absent from the `variables` dict passed to `compile_prompt` or `bind()`, the SDK raises a `ValueError` at compile time — before anything is sent to your LLM:
 
 ```python
+from northstar import compile_prompt, PromptVersion
+
 version = PromptVersion(
     id=...,
     prompt_id=...,
@@ -170,7 +187,7 @@ The error message lists every missing variable name in a comma-separated string 
 
 ## Variable schema auto-extraction
 
-When a `PromptVersion` is created — either on the server or locally in code — NorthStar scans the template content and builds a `variables` list automatically. The extraction logic lives in `_prompt_template.py`:
+When a `PromptVersion` is created — either on the server or locally in code — NorthStar scans the template content and builds a `variables` list automatically. The extraction logic lives in `_prompt_template.py`.
 
 ### `extract_variables(template)`
 
@@ -198,7 +215,7 @@ schema = variables_schema("Hello {{ name }}, write {count} bullets for {{ topic 
 # ]
 ```
 
-All variables are typed as `"string"`, marked `required: True`, and have `default: None`. If the server returns a `PromptVersion` with an empty `variables` list, the SDK re-runs `variables_schema` locally via a Pydantic model validator so the schema is always populated before you call `compile`.
+All variables are typed as `"string"`, marked `required: True`, and have `default: None`. If the server returns a `PromptVersion` with an empty `variables` list, the SDK re-runs `variables_schema` locally via a Pydantic model validator so the schema is always populated before you call `compile_prompt`.
 
 ### `render_template(template, variables)`
 
@@ -218,35 +235,31 @@ You generally do not need to call `render_template` directly — use `compile_pr
 
 ## End-to-end example
 
-The following shows the full pull → compile → record flow, reading the model hint directly from the compiled prompt:
+The following shows the full pull → bind → record flow, reading the model hint directly from the compiled prompt:
 
 ```python
-import northstar
+from northstar import Northstar
 
-with northstar.pull_prompt("summarizer", label="production") as prompt:
-    # Read model hint from the version stored in the dashboard
-    model = prompt.model or "gpt-4o"
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+prompt = client.pull_prompt("summarizer", label="production")
 
-    with northstar.model_call("summarise", model=model) as llm:
-        with prompt.bind(
-            variables={"doc": doc_text, "max_words": 120},
-        ) as compiled:
-            llm.record_input_messages([
-                {"role": "system", "content": "You are a concise summariser."},
-                {"role": "user",   "content": compiled.content},
-            ])
-            response = call_llm(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are a concise summariser."},
-                    {"role": "user",   "content": compiled.content},
-                ],
-            )
-            llm.record_output_message(response.choices[0].message.model_dump())
-            llm.record_usage(
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-            )
+with client.session() as session:
+    with session.run("agent") as run:
+        with run.span("chat") as span:
+            with prompt.bind(
+                variables={"doc": doc_text, "max_words": 120},
+                span=span,
+            ) as compiled:
+                # Read model hint from the version stored in the dashboard
+                model = compiled.model or "gpt-4o"
+
+                response = call_llm(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You are a concise summariser."},
+                        {"role": "user",   "content": compiled.content},
+                    ],
+                )
 ```
 
 When this block exits, NorthStar flushes a prompt link containing the `prompt_version_id`, the `content_hash`, and the exact `variable_values` used — making the trace fully reproducible from the dashboard.

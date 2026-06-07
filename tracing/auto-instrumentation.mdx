@@ -1,7 +1,7 @@
 ---
-title: "Auto-Instrument OpenAI and Anthropic Clients"
+title: "Auto-Instrument OpenAI and Anthropic Calls in Python"
 sidebarTitle: "Auto-Instrumentation"
-description: "Call northstar.auto_instrument() once to automatically capture all OpenAI and Anthropic API calls, including messages, tool calls, token usage, and USD cost."
+description: "Call northstar.auto_instrument() once to capture all OpenAI and Anthropic API calls automatically, including messages, tool calls, token usage, and cost."
 ---
 
 `northstar.auto_instrument()` monkey-patches the OpenAI and Anthropic Python client libraries so that every LLM API call is captured as a model span inside the current NorthStar trace — without any changes to the call sites themselves. It must be called **before** `northstar.init()` and before any OpenAI or Anthropic client instances are created. Calling it after the libraries have already been imported and instantiated will still patch the class methods, but calling it first guarantees the patch is in place before any client object is used.

@@ -1,7 +1,7 @@
 ---
-title: "Configure the NorthStar SDK"
+title: "Configure the NorthStar Python SDK: init() Reference"
 sidebarTitle: "Configuration"
-description: "All northstar.init() parameters and environment variables. Control batching, capture behavior, sensitive field redaction, debug mode, and the ingest endpoint URL."
+description: "All northstar.init() parameters, environment variables, and defaults. Configure batching, capture behavior, redaction, and the ingest endpoint."
 ---
 
 The NorthStar SDK is configured once at startup with a call to `northstar.init()`. Every parameter has a corresponding environment variable, and any argument you pass to `init()` takes precedence over its environment variable counterpart. The SDK will operate as a no-op — never raising exceptions or disrupting application control flow — if it is disabled or if the required credentials are missing.
@@ -171,7 +171,7 @@ Signals the background worker to stop, waits for it to exit (up to `flush_interv
 
 ```python
 # Explicit shutdown (useful in long-running services that reinitialize the SDK)
-northstar.flush()
+northstar.shutdown()
 ```
 
 <Tip>

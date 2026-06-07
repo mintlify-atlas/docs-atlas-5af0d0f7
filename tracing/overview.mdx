@@ -1,7 +1,7 @@
 ---
-title: "Tracing Architecture in NorthStar"
+title: "NorthStar Tracing Architecture: Sessions to Events"
 sidebarTitle: "Overview"
-description: "Understand the Session, Run, Span, and Event hierarchy that NorthStar uses to capture every step of an AI agent run, including LLM calls and tool invocations."
+description: "Understand how NorthStar organizes traces into Sessions, Runs, Spans, and Events to capture every LLM call and tool invocation in an AI agent run."
 ---
 
 NorthStar traces every step of an AI agent run by organizing captured data into a strict four-level hierarchy: Sessions, Runs, Spans, and Events. This structure makes it possible to correlate a user interaction across multiple agent steps, individual LLM calls, and every tool invocation — all without touching your application control flow. Data flows from your agent process through an in-memory queue and a background worker thread directly to a Supabase Edge Function, then into private Postgres tables, and is visualized on the NorthStar dashboard.

@@ -1,7 +1,7 @@
 ---
-title: "LLM Judges for Qualitative Evaluation"
+title: "LLM Judges for Qualitative Agent Evaluation in NorthStar"
 sidebarTitle: "LLM Judges"
-description: "Use RubricJudge and FaithfulnessJudge to grade agent responses with an LLM. Configure scoring mode, passing threshold, and the judge model from any LiteLLM-supported provider."
+description: "Grade agent responses with RubricJudge or FaithfulnessJudge. Set scoring mode, passing threshold, and judge model from any LiteLLM-compatible provider."
 ---
 
 Deterministic graders can tell you whether the right tools were called or whether the response contains an expected phrase, but they cannot tell you whether the response is actually good. LLM judges fill that gap by prompting a language model to evaluate the agent's final response against a rubric, a stated goal, or a faithfulness criterion. NorthStar ships two general-purpose judges — `RubricJudge` and `FaithfulnessJudge` — and two trace-level judges — `HallucinatedToolResultJudge` and `PlanningActionMismatchJudge` — all built on [LiteLLM](https://docs.litellm.ai/) so they work with any supported provider.

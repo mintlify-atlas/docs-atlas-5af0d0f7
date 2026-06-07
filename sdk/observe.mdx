@@ -1,7 +1,7 @@
 ---
-title: "northstar.observe() — Instrument a Child Span"
+title: "northstar.observe() — Instrument Functions as Child Spans"
 sidebarTitle: "observe()"
-description: "Use @northstar.observe to wrap any function as a child span inside an active trace. Automatically captures function arguments as input and return value as output."
+description: "Use @northstar.observe() to wrap any function as a child span inside an active trace, capturing arguments as input and the return value as output."
 ---
 
 `northstar.observe()` is a **decorator factory** that wraps a function in a child span tied to the currently active trace. Every time the decorated function is called, NorthStar opens a span for it, captures the function's arguments as `tool_arguments` events and the return value as a `tool_result` event, then closes the span when the function returns. This is the primary way to add structured observability to helper functions, tool calls, retrieval steps, and any other sub-operations inside an agent run.

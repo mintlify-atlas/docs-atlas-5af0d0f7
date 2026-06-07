@@ -1,7 +1,7 @@
 ---
 title: "Versioned Prompt Management in NorthStar"
 sidebarTitle: "Overview"
-description: "NorthStar stores prompt templates server-side with full version history. Pull, compile, and bind prompts to model call spans to track which prompt version produced each trace."
+description: "NorthStar stores versioned prompt templates server-side. Pull by label, compile with variables, and bind to model spans for full per-trace reproducibility."
 ---
 
 Prompt management in NorthStar connects every model call back to the exact prompt template that produced it. Instead of hardcoding prompt strings inside your agent code, you store templates server-side in the NorthStar dashboard, pull them at runtime by name and label, compile them with your variables, and pass the compiled content to your LLM. Because the SDK automatically records a prompt link on the surrounding model call span, every trace in your dashboard carries a precise reference to the prompt version, variable values, and content hash that drove it — giving you full reproducibility and the ability to correlate prompt changes with changes in agent behaviour.
@@ -35,37 +35,43 @@ NorthStar's prompt system is built around three Pydantic models that flow in seq
 
 ## Pull and compile workflow
 
-The standard pattern is a single `with northstar.pull_prompt(...)` block that fetches the prompt version, compiles it, and uses the result inside a model call:
+The standard pattern is to call `client.pull_prompt()` to fetch a `CompiledPrompt`, then use `prompt.bind()` as a context manager to render the template and automatically link it to the enclosing model call span:
 
 ```python
-with northstar.pull_prompt("summarizer", label="production") as prompt:
-    compiled = prompt.compile(doc=doc_text, max_words=120)
-    with northstar.model_call("summarise", model="gpt-4o") as llm:
-        llm.record_input_messages([{"role": "user", "content": compiled}])
+from northstar import Northstar
+
+client = Northstar(api_key="ns_...", project_id="<project-ref>")
+prompt = client.pull_prompt("summarizer", label="production")
+
+with client.session() as session:
+    with session.run("agent") as run:
+        with run.span("chat") as span:
+            with prompt.bind(
+                variables={"doc": doc_text, "max_words": 120},
+                span=span,
+            ) as compiled:
+                # compiled.content is the fully rendered string
+                response = call_llm(model="gpt-4o", content=compiled.content)
 ```
 
 <Steps>
   <Step title="pull_prompt resolves the version">
-    `northstar.pull_prompt("summarizer", label="production")` posts to the
+    `client.pull_prompt("summarizer", label="production")` posts to the
     NorthStar resolve endpoint and returns a `CompiledPrompt` pre-loaded with
-    the `PromptVersion` identified by the `"production"` label. The context
-    manager keeps the object alive for the duration of the block.
+    the `PromptVersion` identified by the `"production"` label. The result is
+    cached by default so subsequent calls within the same process are fast.
   </Step>
-  <Step title="compile renders the template">
-    `prompt.compile(doc=doc_text, max_words=120)` calls `render_template` on
-    the version's content, substituting every `{{ variable }}` and `{variable}`
-    placeholder. Missing variables raise a `ValueError` immediately — nothing is
-    silently dropped.
-  </Step>
-  <Step title="model_call span is opened">
-    `northstar.model_call("summarise", model="gpt-4o")` opens a child span of
-    kind `MODEL` inside the active trace.
+  <Step title="bind() renders the template">
+    `prompt.bind(variables={...}, span=span)` is a context manager. On entry it
+    calls `compile_prompt` on the underlying version, substituting every
+    `{{ variable }}` and `{variable}` placeholder. Missing variables raise a
+    `ValueError` immediately — nothing is silently dropped.
   </Step>
   <Step title="Prompt is automatically bound to the span">
-    When the `pull_prompt` context manager exits, the SDK enqueues a
-    `prompt_link` record that associates the span's `trace_id` and `span_id`
-    with the `prompt_version_id` and the exact `variable_values` used — no
-    extra calls required.
+    When the `bind()` context manager exits, the SDK enqueues a `prompt_link`
+    record that associates the span's `trace_id` and `span_id` with the
+    `prompt_version_id` and the exact `variable_values` used — no extra calls
+    required.
   </Step>
 </Steps>
 
@@ -78,25 +84,23 @@ currently points to.
 
 ```python
 # Resolve whichever version is currently tagged "production"
-with northstar.pull_prompt("summarizer", label="production") as prompt:
-    ...
+prompt = client.pull_prompt("summarizer", label="production")
 
 # Resolve the "staging" label for pre-release testing
-with northstar.pull_prompt("summarizer", label="staging") as prompt:
-    ...
+prompt = client.pull_prompt("summarizer", label="staging")
 ```
 
 <Note>
   Labels like `"production"` and `"staging"` are conventions, not reserved
   keywords. You can create any label name in the dashboard and point it to any
   version. Promoting a new version to `"production"` is a label update — the
-  old version is never deleted and can always be restored.
+  old version is never deleted and can always be restored. The default label
+  used when none is specified is `"prod"`.
 </Note>
 
 ## Automatic prompt-to-span binding
 
-When a compiled prompt is used inside a `model_call` block, NorthStar records
-two pieces of traceability data automatically:
+When `bind()` is used, NorthStar records two pieces of traceability data automatically:
 
 - **`prompt.compile.requested`** — written to the span's `attributes` dict at
   compile time, containing the `prompt_version_id` and `content_hash`.
@@ -109,10 +113,10 @@ which prompt version was active, what variables were injected, and whether the
 content has drifted (via `content_hash`) since the trace was recorded.
 
 <Tip>
-  You can also bind a compiled prompt to a span explicitly by calling
-  `prompt.bind(variables={...}, span=span)` as a context manager. This is
-  useful when the model call span is created separately from the
-  `pull_prompt` block. See [Templates](/prompts/templates) for details.
+  When `span` is omitted from `prompt.bind()`, the SDK automatically picks up
+  the active model call span from the current context. This is useful when the
+  model call span is managed by `northstar.model_call()` and you want minimal
+  boilerplate. See [Templates](/prompts/templates) for details.
 </Tip>
 
 ## Next steps
